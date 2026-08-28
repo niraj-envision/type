@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en" data-theme="serika-dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>type</title>
+<meta name="description" content="A minimal, fast typing test — live WPM, accuracy, consistency and mechanical keyboard sounds.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Roboto+Mono:wght@400;500&family=IBM+Plex+Mono:wght@400;500&family=Source+Code+Pro:wght@400;500&family=Lexend+Deca:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⌨️</text></svg>">
+</head>
+<body>
+
+<div id="capslock" class="capslock" hidden>⇪ caps lock</div>
+
+<header id="header">
+  <a class="logo" href="#" id="logo" title="restart">
+    <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true">
+      <rect x="1.5" y="5.5" width="21" height="13" rx="3" fill="none" stroke="currentColor" stroke-width="1.6"/>
+      <path d="M5.5 9.2h1M8.5 9.2h1M11.5 9.2h1M14.5 9.2h1M17.5 9.2h1M5.5 12.2h1M8.5 12.2h1M11.5 12.2h1M14.5 12.2h1M17.5 12.2h1M8.5 15.2h7"
+            stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+    </svg>
+    <span class="logo-text">type</span>
+  </a>
+  <nav class="top-nav">
+    <button class="icon-btn" data-action="palette" title="command palette (esc)">⌘</button>
+    <button class="icon-btn" data-action="stats" title="your results">📈</button>
+    <button class="icon-btn" data-action="settings" title="settings">⚙</button>
+  </nav>
+</header>
+
+<main>
+  <!-- ── config bar ─────────────────────────────────────────────── -->
+  <div id="config" class="config">
+    <div class="config-group">
+      <button class="cfg" data-toggle="punctuation" title="punctuation">@ punctuation</button>
+      <button class="cfg" data-toggle="numbers" title="numbers">＃ numbers</button>
+    </div>
+    <div class="config-sep"></div>
+    <div class="config-group">
+      <button class="cfg" data-mode="time">⏱ time</button>
+      <button class="cfg" data-mode="words">A words</button>
+      <button class="cfg" data-mode="quote">❝ quote</button>
+      <button class="cfg" data-mode="infinite">∞ infinite</button>
+      <button class="cfg" data-mode="zen">✎ zen</button>
+      <button class="cfg" data-mode="adaptive">◎ adaptive</button>
+    </div>
+    <div class="config-sep" id="amount-sep"></div>
+    <div class="config-group" id="amounts"></div>
+  </div>
+
+  <!-- ── test ───────────────────────────────────────────────────── -->
+  <section id="test" class="test">
+    <div class="live-bar">
+      <div id="live-counter" class="live-counter">30</div>
+      <div id="live-wpm" class="live-wpm" hidden></div>
+    </div>
+
+    <div id="typing-area" class="typing-area" tabindex="0">
+      <div id="caret" class="caret"></div>
+      <div id="words" class="words"></div>
+      <div id="outoffocus" class="outoffocus"><span>click here or press any key to focus</span></div>
+      <input id="hidden-input" autocomplete="off" autocapitalize="off" autocorrect="off"
+             spellcheck="false" aria-label="typing input" tabindex="-1">
+    </div>
+
+    <div class="test-controls">
+      <button id="restart" class="restart-btn" title="restart test (tab)">
+        <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true">
+          <path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v4h-4" fill="none" stroke="currentColor"
+                stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </div>
+  </section>
+
+  <!-- ── results ────────────────────────────────────────────────── -->
+  <section id="results" class="results" hidden>
+    <div class="results-top">
+      <div class="big-stats">
+        <div class="stat big">
+          <div class="stat-label">wpm</div>
+          <div class="stat-value" id="r-wpm">0</div>
+          <div class="stat-pb" id="r-pb" hidden>new best!</div>
+        </div>
+        <div class="stat big">
+          <div class="stat-label">acc</div>
+          <div class="stat-value" id="r-acc">0%</div>
+        </div>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="chart" width="1000" height="260"></canvas>
+      </div>
+    </div>
+
+    <div class="small-stats">
+      <div class="stat"><div class="stat-label">test type</div><div class="stat-sub" id="r-type">—</div></div>
+      <div class="stat"><div class="stat-label">raw</div><div class="stat-sub" id="r-raw">0</div></div>
+      <div class="stat" title="correct / incorrect / extra / missed">
+        <div class="stat-label">characters</div><div class="stat-sub" id="r-chars">0/0/0/0</div></div>
+      <div class="stat" title="how even your speed was across the test">
+        <div class="stat-label">consistency</div><div class="stat-sub" id="r-consistency">0%</div></div>
+      <div class="stat"><div class="stat-label">time</div><div class="stat-sub" id="r-time">0s</div></div>
+    </div>
+
+    <div class="weak-keys" id="weak-keys" hidden>
+      <span class="weak-label">keys to work on</span>
+      <div class="weak-list" id="weak-list"></div>
+    </div>
+
+    <div class="results-actions">
+      <button class="icon-btn big-icon" id="next-test" title="next test (tab)">↻</button>
+      <button class="icon-btn big-icon" id="repeat-test" title="repeat this text">⟲</button>
+      <button class="icon-btn big-icon" id="share-result" title="copy result">⧉</button>
+    </div>
+    <div class="results-hint"><kbd>tab</kbd> next test · <kbd>esc</kbd> commands</div>
+  </section>
+</main>
+
+<footer id="footer">
+  <div class="footer-left">
+    <span class="hint"><kbd>tab</kbd> restart</span>
+    <span class="hint"><kbd>esc</kbd> commands</span>
+    <span class="hint"><kbd>ctrl</kbd>+<kbd>⌫</kbd> delete word</span>
+    <span class="hint" id="zen-hint" hidden><kbd>shift</kbd>+<kbd>enter</kbd> finish</span>
+  </div>
+  <div class="footer-right">
+    <button class="foot-btn" data-action="sound" id="sound-btn">🔊 <span id="sound-name">click</span></button>
+    <button class="foot-btn" data-action="theme" id="theme-btn">🎨 <span id="theme-name">serika dark</span></button>
+  </div>
+</footer>
+
+<!-- ── command palette ──────────────────────────────────────────── -->
+<div id="palette" class="palette" hidden>
+  <div class="palette-box">
+    <input id="palette-input" placeholder="type a command…" autocomplete="off" spellcheck="false">
+    <ul id="palette-list" class="palette-list"></ul>
+  </div>
+</div>
+
+<!-- ── settings drawer ──────────────────────────────────────────── -->
+<div id="settings" class="drawer" hidden>
+  <div class="drawer-box">
+    <div class="drawer-head"><h2>settings</h2><button class="icon-btn" data-close="settings">✕</button></div>
+
+    <div class="setting">
+      <div class="setting-text"><h3>sound on click</h3><p>a synthesised switch, generated in the browser — no audio files.</p></div>
+      <div class="chips" id="set-sound"></div>
+    </div>
+    <div class="setting">
+      <div class="setting-text"><h3>volume</h3><p>how loud the keys are. <span id="latency-note"></span></p></div>
+      <input type="range" id="set-volume" min="0" max="100" step="1">
+    </div>
+    <div class="setting">
+      <div class="setting-text"><h3>space bar</h3><p>the sound at the end of a word: the same click as a letter, a deeper one, or nothing.</p></div>
+      <div class="chips" id="set-spacesound"></div>
+    </div>
+    <div class="setting">
+      <div class="setting-text"><h3>error sound</h3><p>a short buzz when you hit the wrong key.</p></div>
+      <div class="chips" id="set-errorsound"></div>
+    </div>
+    <div class="setting">
+      <div class="setting-text"><h3>theme</h3><p>colours for the whole page.</p></div>
+      <div class="chips" id="set-theme"></div>
+    </div>
+    <div class="setting">
+      <div class="setting-text"><h3>caret</h3><p>the shape that follows your cursor.</p></div>
+      <div class="chips" id="set-caret"></div>
+    </div>
+    <div class="setting">
+      <div class="setting-text"><h3>smooth caret</h3><p>animate the caret between letters.</p></div>
+      <div class="chips" id="set-smooth"></div>
+    </div>
+    <div class="setting">
+      <div class="setting-text"><h3>stop on error</h3><p>refuse the keypress, or stop at the end of a wrong word.</p></div>
+      <div class="chips" id="set-stoponerror"></div>
+    </div>
+    <div class="setting">
+      <div class="setting-text"><h3>blind mode</h3><p>no feedback while typing. accuracy is still measured.</p></div>
+      <div class="chips" id="set-blind"></div>
+    </div>
+    <div class="setting">
+      <div class="setting-text"><h3>live wpm</h3><p>show speed while you type.</p></div>
+      <div class="chips" id="set-livewpm"></div>
+    </div>
+    <div class="setting">
+      <div class="setting-text"><h3>layout</h3><p>a wrapped paragraph, or one straight line with the word you are typing held in the middle.</p></div>
+      <div class="chips" id="set-tape"></div>
+    </div>
+    <div class="setting">
+      <div class="setting-text"><h3>font</h3><p>the typeface of the test text.</p></div>
+      <div class="chips" id="set-font"></div>
+    </div>
+    <div class="setting">
+      <div class="setting-text"><h3>font weight</h3><p>heavier stems read sharper as light text on a dark ground.</p></div>
+      <div class="chips" id="set-weight"></div>
+    </div>
+    <div class="setting">
+      <div class="setting-text"><h3>font size</h3><p>size of the test text.</p></div>
+      <div class="chips" id="set-fontsize"></div>
+    </div>
+    <div class="setting danger">
+      <div class="setting-text"><h3>reset everything</h3><p>clears your results, personal bests and per-key history.</p></div>
+      <button class="chip danger-chip" id="set-reset">reset</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── stats drawer ─────────────────────────────────────────────── -->
+<div id="stats" class="drawer" hidden>
+  <div class="drawer-box">
+    <div class="drawer-head"><h2>your results</h2><button class="icon-btn" data-close="stats">✕</button></div>
+    <div class="pb-grid" id="pb-grid"></div>
+    <h3 class="section-title">last 50 tests</h3>
+    <canvas id="history-chart" width="1000" height="220"></canvas>
+    <h3 class="section-title">per-key accuracy</h3>
+    <div class="keyboard-heat" id="keyboard-heat"></div>
+    <table class="history-table"><thead>
+      <tr><th>wpm</th><th>raw</th><th>acc</th><th>consistency</th><th>mode</th><th>when</th></tr>
+    </thead><tbody id="history-body"></tbody></table>
+  </div>
+</div>
+
+<script src="js/words.js"></script>
+<script src="js/sound.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
