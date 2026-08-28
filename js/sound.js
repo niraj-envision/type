@@ -90,6 +90,31 @@ window.Sound = (() => {
   function resume() { if (ctx && ctx.state === 'suspended') ctx.resume(); }
   const rand = (a, b) => a + Math.random() * (b - a);
 
+  /* Schedule a few milliseconds ahead, never at `currentTime`. A press is a
+     10-20ms envelope; if the main thread is busy — and on a keystroke it
+     always is, updating the word, measuring layout, moving the caret — the
+     audio thread can reach that block after the envelope's own start time has
+     passed, and render the tail of a sound that never began. That is a press
+     you hear nothing for. Seven milliseconds is more than one render quantum
+     and far below the ~20ms where a delay becomes audible. */
+  const LOOKAHEAD = 0.007;
+
+  /* Two presses scheduled at the same instant do not sound like two presses.
+     They sum into a single louder click, so a fast roll — or any keys the
+     browser hands over in one batch after a busy frame — loses every press
+     but the first. Holding them a few milliseconds apart is what makes them
+     audible as separate keys. The queue is capped so it can never run ahead
+     of your fingers. */
+  const MIN_GAP = 0.011, MAX_AHEAD = 0.06;
+  let lastT = 0;
+
+  function when() {
+    const now = ctx.currentTime;
+    const t = Math.min(Math.max(now + LOOKAHEAD, lastT + MIN_GAP), now + MAX_AHEAD);
+    lastT = t;
+    return t;
+  }
+
   function noise(t, freq, q, gain, dur, type) {
     const src = ctx.createBufferSource();
     src.buffer = noiseBuf;
@@ -142,7 +167,7 @@ window.Sound = (() => {
   function press(key, busy) {
     const s = SWITCHES[pack];
     if (!s) return;
-    const t = ctx.currentTime;
+    const t = when();
     const isSpace = key === 'space';
     const [pMul, gMul] = isSpace ? (s.space || [0.78, 1.1]) : [1, 1];
     const p = rand(0.965, 1.04) * pMul;      // per-press pitch jitter
@@ -168,7 +193,7 @@ window.Sound = (() => {
       if (key === 'error' ? (!errorSound || pack === 'off') : pack === 'off') return;
       if (!init()) return;
       resume();
-      if (key === 'error') errorVoice(ctx.currentTime, 1);
+      if (key === 'error') errorVoice(when(), 1);
       else press(key, voices(ctx.currentTime) > 12);
     } catch { /* never let audio break typing */ }
   }

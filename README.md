@@ -25,6 +25,7 @@ that one self-contained file.
 | **time** | 15 / 30 / 60 / 120 seconds |
 | **words** | 10 / 25 / 50 / 100 words |
 | **quote** | short / medium / long, credited on the results screen |
+| **story** | real prose: fables, openings of public-domain books, short essays |
 | **infinite** | endless words, no clock — stop with `shift+enter` |
 | **zen** | no target text at all; whatever you type is the text |
 | **adaptive** | words weighted toward the keys you actually get wrong |
@@ -107,12 +108,27 @@ a **deeper** switch to mark the end of a word, or **off** while the letters
 keep clicking. `typewriter` rings its carriage bell only on `deeper`. A
 separate low buzz fires on a wrong key and can be switched off on its own.
 
+## Story mode
+
+Random words measure speed; they are not worth reading. Story mode gives you
+continuous prose instead — a fable retold, the opening of a public-domain
+novel, or a short essay written for this project. Passages are cut to length
+**at the end of a sentence**, never mid-clause, and the title and author sit
+beside the test while you type and again on the results screen.
+
+Everything in `js/stories.js` is free of copyright: excerpts are quoted as
+written, fables are retold in plain modern English, essays are original. The
+text is kept to typeable ASCII on purpose — straight quotes, no em dashes.
+A typing test should not make you hunt for a character your keyboard does not
+have.
+
 ## Layout
 
 **paragraph** wraps the text over three lines and keeps the word you are
-typing on the second one. **single line** (tape) puts the whole test on one
-straight line that slides sideways, holding the current word in the middle of
-the screen — set it in Settings → layout, and it works in every mode.
+typing on the second one. **single line** puts the whole test on one straight
+line that slides sideways, holding the current word in the middle of the
+screen. It is the `⇄ single line` button in the top bar (also in Settings →
+layout), and it works in every mode.
 
 Either way only a window of words is ever in the DOM. Words that scroll out of
 sight are dropped — whole lines above the view in paragraph mode, a screen's
@@ -145,6 +161,7 @@ leave the machine. Settings → reset clears all of it.
     index.html      markup
     css/style.css   ten themes, four colour variables each
     js/words.js     word lists and quotes
+    js/stories.js   prose passages for story mode
     js/sound.js     the synthesiser
     js/app.js       the engine: generation, input, timing, stats, charts, ui
     build.sh        inlines the above into dist/type.html

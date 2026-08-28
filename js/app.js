@@ -22,7 +22,7 @@ const DEFAULTS = {
   caret: 'line', smooth: true, stopOnError: 'off',
   blind: false, liveWpm: true, fontSize: 1.6,
   spaceSound: 'same', font: 'JetBrains Mono', fontWeight: 500,
-  tape: false
+  tape: false, storyLength: 'medium'
 };
 
 /* Modes with no finish line of their own: they run until you stop them. */
@@ -131,9 +131,32 @@ function makeWords(n) {
   return decorate(raw);
 }
 
+/* A passage, cut to length at the end of a sentence — a story that stops
+   mid-clause is worse than one that runs a few words long. */
+const STORY_CAP = { short: 50, medium: 100, long: 200, full: Infinity };
+
+const endsSentence = w => /[.!?]["']?$/.test(w);
+
+function pickStory() {
+  const s = rnd(STORIES);
+  const words = s.text.trim().split(/\s+/);
+  const cap = STORY_CAP[config.storyLength] ?? 100;
+  if (words.length <= cap) return { ...s, words };
+
+  let end = 0;
+  for (let i = cap; i < Math.min(words.length, cap + 30); i++)
+    if (endsSentence(words[i])) { end = i + 1; break; }
+  if (!end) for (let i = cap - 1; i > cap / 2; i--)
+    if (endsSentence(words[i])) { end = i + 1; break; }
+  return { ...s, words: words.slice(0, end || cap) };
+}
+
 function seed() {
   state.quote = null;
-  if (config.mode === 'quote') {
+  if (config.mode === 'story') {
+    state.quote = pickStory();
+    state.words = state.quote.words;
+  } else if (config.mode === 'quote') {
     const pool = WORDS.quotes.filter(q => q.length === config.quoteLength);
     state.quote = rnd(pool.length ? pool : WORDS.quotes);
     state.words = state.quote.text.split(/\s+/);
@@ -142,15 +165,19 @@ function seed() {
   } else if (config.mode === 'zen') {
     state.words = [];
   } else {                                     // time, infinite, adaptive
-    state.words = makeWords(60);
+    /* Enough for the whole test at a fast pace before a single key is
+       pressed: 200 wpm for the full duration, floor of 80. Topping up is
+       still there, but it should never be what saves the test. */
+    const need = config.mode === 'time' ? Math.max(80, Math.ceil(config.time / 60 * 200)) : 80;
+    state.words = makeWords(need);
   }
 }
 
 /* time and adaptive never run out of words */
 function topUp() {
-  if (config.mode === 'quote' || config.mode === 'words' || config.mode === 'zen') return;
-  if (state.words.length - state.wordIndex < 25) {
-    const more = makeWords(30);
+  if (['quote', 'story', 'words', 'zen'].includes(config.mode)) return;
+  if (state.words.length - state.wordIndex < 40) {
+    const more = makeWords(60);
     state.words.push(...more);
     appendWords(more);
   }
@@ -315,6 +342,7 @@ function typeChar(ch) {
   }
 
   const i = state.wordIndex;
+  if (config.mode !== 'zen' && !state.words[i]) { topUp(); renderAll(); }
   const target = config.mode === 'zen' ? null : (state.words[i] || '');
   const typed  = state.typed[i] || '';
 
@@ -354,7 +382,7 @@ function typeChar(ch) {
 
 function isLastWord(i) {
   if (config.mode === 'words') return i === config.wordCount - 1;
-  if (config.mode === 'quote') return i === state.words.length - 1;
+  if (['quote', 'story'].includes(config.mode)) return i === state.words.length - 1;
   return false;
 }
 
@@ -380,7 +408,7 @@ function typeSpace() {
 
   const limitReached =
     (config.mode === 'words' && state.wordIndex >= config.wordCount) ||
-    (config.mode === 'quote' && state.wordIndex >= state.words.length);
+    (['quote', 'story'].includes(config.mode) && state.wordIndex >= state.words.length);
   if (limitReached) return finish();
 
   topUp();
@@ -494,6 +522,7 @@ function tick() {
 
 function loop() {
   if (state.finished) return;
+  topUp();
   if (config.liveWpm && state.started) {
     liveWpmEl.hidden = false;
     liveWpmEl.textContent = liveWpm() + ' wpm';
@@ -505,7 +534,7 @@ function loop() {
 function progressLabel() {
   if (config.mode === 'time')  return String(config.time);
   if (config.mode === 'words') return `${state.wordIndex}/${config.wordCount}`;
-  if (config.mode === 'quote') return `${state.wordIndex}/${state.words.length}`;
+  if (['quote', 'story'].includes(config.mode)) return `${state.wordIndex}/${state.words.length}`;
   /* Endless: there is no target to count down to, so count up — elapsed
      time, and how many words you have put behind you. */
   if (!state.started) return '0:00';
@@ -582,6 +611,7 @@ function modeLabel() {
   if (config.mode === 'time')  return `time ${config.time}`;
   if (config.mode === 'words') return `words ${config.wordCount}`;
   if (config.mode === 'quote') return `quote ${config.quoteLength}`;
+  if (config.mode === 'story') return `story ${config.storyLength}`;
   if (config.mode === 'zen')   return 'zen';
   if (config.mode === 'infinite') return 'infinite';
   return 'adaptive';
@@ -591,6 +621,7 @@ function modeKey() {
   if (config.mode === 'time')  return `time-${config.time}${extra}`;
   if (config.mode === 'words') return `words-${config.wordCount}${extra}`;
   if (config.mode === 'quote') return `quote-${config.quoteLength}`;
+  if (config.mode === 'story') return `story-${config.storyLength}`;
   return config.mode;
 }
 
@@ -606,7 +637,9 @@ function showResults(r, isPb) {
   $('#r-chars').textContent = r.chars;
   $('#r-consistency').textContent = r.consistency + '%';
   $('#r-time').textContent = r.seconds + 's';
-  if (state.quote) $('#r-type').textContent = 'quote — ' + state.quote.source;
+  if (state.quote) $('#r-type').textContent = state.quote.title
+    ? `${state.quote.title}${state.quote.author ? ' — ' + state.quote.author : ''}`
+    : 'quote — ' + state.quote.source;
   drawChart();
   showWeakKeys();
 }
@@ -737,24 +770,37 @@ function drawHistoryChart() {
 const AMOUNTS = {
   time:  [15, 30, 60, 120],
   words: [10, 25, 50, 100],
-  quote: ['short', 'medium', 'long']
+  quote: ['short', 'medium', 'long'],
+  story: ['short', 'medium', 'long', 'full']
 };
 
 function renderConfigBar() {
   $$('[data-mode]').forEach(b => b.classList.toggle('active', b.dataset.mode === config.mode));
   /* punctuation and numbers only mean something for generated words */
-  const generated = ['time', 'words', 'adaptive'].includes(config.mode);
+  const generated = ['time', 'words', 'infinite', 'adaptive'].includes(config.mode);
   $$('[data-toggle]').forEach(b => {
-    b.hidden = !generated;
-    b.classList.toggle('active', !!config[b.dataset.toggle]);
+    const t = b.dataset.toggle;
+    b.hidden = t !== 'tape' && !generated;   // tape is a layout, it applies everywhere
+    b.classList.toggle('active', !!config[t]);
   });
   const box = $('#amounts');
+  const src = $('#source');
+  /* A story is worth naming while you type it; a quote's source is a small
+     reveal, so that one waits for the results screen. */
+  if (config.mode === 'story' && state.quote) {
+    src.hidden = false;
+    src.innerHTML = `<b>${state.quote.title}</b><br>${
+      state.quote.author ? state.quote.author : 'written for this test'}${
+      state.quote.note === 'retold' ? ', retold' : ''}`;
+  } else src.hidden = true;
+
   const list = AMOUNTS[config.mode];
   $('#amount-sep').style.display = list ? '' : 'none';
   box.innerHTML = '';
   if (!list) return;
   const current = config.mode === 'time' ? config.time
-                : config.mode === 'words' ? config.wordCount : config.quoteLength;
+                : config.mode === 'words' ? config.wordCount
+                : config.mode === 'story' ? config.storyLength : config.quoteLength;
   list.forEach(v => {
     const b = document.createElement('button');
     b.className = 'cfg' + (v === current ? ' active' : '');
@@ -762,6 +808,7 @@ function renderConfigBar() {
     b.onclick = () => {
       if (config.mode === 'time') config.time = v;
       else if (config.mode === 'words') config.wordCount = v;
+      else if (config.mode === 'story') config.storyLength = v;
       else config.quoteLength = v;
       saveConfig(); renderConfigBar(); restart();
     };
@@ -782,6 +829,7 @@ function restart() {
   });
   seed();
   renderAll();
+  renderConfigBar();               // the source line names the new passage
   resultsEl.hidden = true;
   testEl.hidden = false;
   $('#config').style.display = '';
@@ -916,7 +964,10 @@ function commands() {
     { name: 'toggle numbers', run: () => { config.numbers = !config.numbers; saveConfig(); renderConfigBar(); restart(); } },
     { name: 'toggle blind mode', run: () => { config.blind = !config.blind; saveConfig(); applyConfig(); } }
   ];
-  ['time','words','quote','zen','adaptive'].forEach(m => c.push({ name: `mode ${m}`, hint: 'mode', run: () => setMode(m) }));
+  ['time','words','quote','story','infinite','zen','adaptive'].forEach(m =>
+    c.push({ name: `mode ${m}`, hint: 'mode', run: () => setMode(m) }));
+  AMOUNTS.story.forEach(v => c.push({ name: `story ${v}`, hint: 'story',
+    run: () => { config.mode='story'; config.storyLength=v; saveConfig(); applyConfig(); restart(); } }));
   AMOUNTS.time.forEach(v => c.push({ name: `time ${v}`, hint: 'time', run: () => { config.mode='time'; config.time=v; saveConfig(); renderConfigBar(); restart(); } }));
   AMOUNTS.words.forEach(v => c.push({ name: `words ${v}`, hint: 'words', run: () => { config.mode='words'; config.wordCount=v; saveConfig(); renderConfigBar(); restart(); } }));
   THEMES.forEach(t => c.push({ name: `theme ${t.replace(/-/g,' ')}`, hint: 'theme', run: () => { config.theme=t; saveConfig(); applyConfig(); } }));
@@ -994,7 +1045,7 @@ document.addEventListener('keydown', e => {
 $$('[data-mode]').forEach(b => b.onclick = () => setMode(b.dataset.mode));
 $$('[data-toggle]').forEach(b => b.onclick = () => {
   config[b.dataset.toggle] = !config[b.dataset.toggle];
-  saveConfig(); renderConfigBar(); restart();
+  saveConfig(); applyConfig(); renderConfigBar(); restart();
 });
 $('#restart').onclick = restart;
 $('#next-test').onclick = restart;

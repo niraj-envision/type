@@ -98,6 +98,11 @@ main {
   font-family: "Lexend Deca", sans-serif;
 }
 .live-wpm { opacity: .55; font-size: 1.5rem; }
+.source {
+  margin-left: auto; text-align: right; color: var(--sub);
+  font-size: .82rem; line-height: 1.3; align-self: center;
+}
+.source b { color: var(--text); font-weight: 500; }
 
 .typing-area {
   position: relative; outline: none; width: 100%;
@@ -114,9 +119,17 @@ main {
   user-select: none;
   transition: transform .18s ease;
 }
+/* The error underline is drawn, not laid out. A real border adds 3px to every
+   word box, which makes the three-line window 9px taller than the height it is
+   clipped to and shaves the bottom off the third line. */
 .word {
-  margin: 0 .55em 0 0; padding-bottom: 1px;
-  border-bottom: 2px solid transparent;
+  margin: 0 .55em 0 0;
+  position: relative;
+}
+.word.error::after {
+  content: ''; position: absolute;
+  left: 0; right: 0; bottom: .18em; height: 2px;
+  background: var(--err);
 }
 
 /* Tape: one straight line that slides sideways, the active word held in the
@@ -129,13 +142,12 @@ main {
   transition: transform .13s cubic-bezier(.22,.7,.3,1);
 }
 .words.tape .word { flex: 0 0 auto; }
-.word.error { border-bottom-color: var(--err); }
 .letter { color: var(--sub); transition: color .06s ease; }
 .letter.correct { color: var(--text); }
 .letter.incorrect { color: var(--err); }
 .letter.extra { color: var(--err-extra); }
 .blind .letter.correct, .blind .letter.incorrect, .blind .letter.extra { color: var(--sub); }
-.blind .word.error { border-bottom-color: transparent; }
+.blind .word.error::after { background: transparent; }
 
 .caret {
   position: absolute; width: 3px; border-radius: 2px;

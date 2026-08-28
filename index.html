@@ -37,12 +37,14 @@
     <div class="config-group">
       <button class="cfg" data-toggle="punctuation" title="punctuation">@ punctuation</button>
       <button class="cfg" data-toggle="numbers" title="numbers">＃ numbers</button>
+      <button class="cfg" data-toggle="tape" title="one line, current word held in the middle">⇄ single line</button>
     </div>
     <div class="config-sep"></div>
     <div class="config-group">
       <button class="cfg" data-mode="time">⏱ time</button>
       <button class="cfg" data-mode="words">A words</button>
       <button class="cfg" data-mode="quote">❝ quote</button>
+      <button class="cfg" data-mode="story">▤ story</button>
       <button class="cfg" data-mode="infinite">∞ infinite</button>
       <button class="cfg" data-mode="zen">✎ zen</button>
       <button class="cfg" data-mode="adaptive">◎ adaptive</button>
@@ -56,6 +58,7 @@
     <div class="live-bar">
       <div id="live-counter" class="live-counter">30</div>
       <div id="live-wpm" class="live-wpm" hidden></div>
+      <div id="source" class="source" hidden></div>
     </div>
 
     <div id="typing-area" class="typing-area" tabindex="0">
@@ -224,6 +227,7 @@
 </div>
 
 <script src="js/words.js"></script>
+<script src="js/stories.js"></script>
 <script src="js/sound.js"></script>
 <script src="js/app.js"></script>
 </body>
