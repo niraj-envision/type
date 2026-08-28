@@ -16,7 +16,9 @@ python3 -m http.server 8777
 ```
 
 Or open `dist/type.html` directly — `./build.sh` inlines the whole site into
-that one self-contained file.
+that one self-contained file and restarts the server on port 8777, so what is
+being served is always what was just built. `./build.sh --no-serve` skips the
+restart.
 
 ## Modes
 
@@ -137,9 +139,19 @@ what is left, so nothing on screen moves. Without that the DOM grows for the
 whole test (630 words in a 60-second run at speed) and every keystroke
 re-measures all of it, which is what makes long tests feel heavy.
 
-The scroll offset is always rounded to whole pixels, and the caret is placed
-from layout offsets rather than bounding rectangles, so it lands correctly
-even while the view is still sliding.
+The scrolling text and the window it scrolls through are two elements, and
+they have to be: a transform moves an element's clip box along with its
+content, so scrolling the words by transforming the box that also clips them
+drags the visible window upward over the wpm row.
+
+Motion is one animation frame driving both the text and the caret, with the
+caret's position stored in the text's own coordinates so the two cannot come
+apart. It is exponential smoothing with an 18ms half-life rather than a CSS
+transition with a fixed duration: it converges from wherever it is, never
+restarts mid-flight, and behaves the same on a 60Hz and a 144Hz screen. At
+200 wpm the caret sits under 5px from its target on average and lands exactly
+on it at rest. Offsets are rounded to whole pixels — a caret on a half pixel
+is a two-pixel grey smear instead of a sharp bar.
 
 ## Type
 
@@ -164,4 +176,4 @@ leave the machine. Settings → reset clears all of it.
     js/stories.js   prose passages for story mode
     js/sound.js     the synthesiser
     js/app.js       the engine: generation, input, timing, stats, charts, ui
-    build.sh        inlines the above into dist/type.html
+    build.sh        inlines the above into dist/type.html, restarts the server

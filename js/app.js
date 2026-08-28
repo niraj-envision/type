@@ -64,6 +64,7 @@ const $  = s => document.querySelector(s);
 const $$ = s => Array.from(document.querySelectorAll(s));
 
 const wordsEl   = $('#words');
+const windowEl  = $('#words-window');
 const caretEl   = $('#caret');
 const areaEl    = $('#typing-area');
 const inputEl   = $('#hidden-input');
@@ -208,11 +209,11 @@ const wordEl = i => wordsEl.children[i - state.domOffset];
 function renderAll() {
   wordsEl.innerHTML = state.words.slice(state.domOffset)
     .map((_, k) => `<div class="word">${wordHTML(state.domOffset + k)}</div>`).join('');
-  wordsEl.style.transform = 'none';
   state.shift = { x: 0, y: 0 };
   measureLines();
   scrollView();
   updateCaret();
+  snapMotion();                    // a freshly drawn test does not slide into place
 }
 
 function appendWords(newWords) {
@@ -228,13 +229,37 @@ function appendWords(newWords) {
   measureLines();
 }
 
+/* The letters of a word are already on the page; typing only changes what
+   colour they are. Rewriting innerHTML for every keystroke threw away and
+   rebuilt those nodes and forced a fresh layout each time, which is the jank
+   underneath everything else. Only the class changes now, and the markup is
+   rebuilt solely when the number of letters actually changes — that is, when
+   an extra letter is added past the end of the word or removed again. */
 function updateWord(i) {
   const el = wordEl(i);
   if (!el) return;
-  el.innerHTML = wordHTML(i);
-  const typed = state.typed[i];
-  el.classList.toggle('error', i < state.wordIndex && typed !== undefined && typed !== state.words[i]);
+  const word = state.words[i] || '', typed = state.typed[i] || '';
+  const spans = el.children;
+  const needed = Math.max(word.length, typed.length) || 1;
+
+  if (spans.length !== needed) {
+    el.innerHTML = wordHTML(i);
+  } else {
+    for (let j = 0; j < needed; j++) {
+      const t = word[j], k = typed[j], span = spans[j];
+      const cls = t === undefined ? 'letter extra'
+                : k === undefined ? 'letter'
+                : k === t ? 'letter correct' : 'letter incorrect';
+      if (span.className !== cls) span.className = cls;
+      if (t === undefined && span.textContent !== k) span.textContent = k;
+    }
+  }
+  el.classList.toggle('error',
+    i < state.wordIndex && state.typed[i] !== undefined && typed !== word);
 }
+
+/* Only a change in letter count can rewrap a line. */
+const widthChanged = (word, typed) => typed.length > word.length;
 
 function measureLines() {
   if (config.tape) { state.lineTops = []; return; }
@@ -252,12 +277,85 @@ function measureLines() {
 function scrollTape() {
   const active = wordEl(state.wordIndex);
   if (!active) return;
-  const x = Math.round(areaEl.clientWidth / 2 - active.offsetLeft);
-  state.shift = { x, y: 0 };
-  wordsEl.style.transform = `translateX(${x}px)`;
+  state.shift = { x: Math.round(areaEl.clientWidth / 2 - active.offsetLeft), y: 0 };
 }
 
-function scrollView() { config.tape ? scrollTape() : scrollLines(); }
+function scrollView() { config.tape ? scrollTape() : scrollLines(); frame(); }
+
+/* ── motion ────────────────────────────────────────────────────────
+   The text and the caret used to animate independently, each on its own CSS
+   transition that restarted from wherever it happened to be on every
+   keystroke. Two consequences: at speed neither ever arrived, so the caret sat
+   a character behind your fingers; and while the view slid to a new line the
+   caret was already drawn at the new offset, so the two came apart.
+
+   Both are now one thing. The caret's position is stored in the text's own
+   coordinates, and the same frame that moves the text moves the caret with it,
+   so they cannot drift apart. Motion is exponential smoothing with a half-life
+   rather than a fixed duration: it converges from wherever it is, it never
+   restarts, and it is frame-rate independent — the same on 60Hz and 144Hz. */
+
+const view   = { x: 0, y: 0 };                 // where the text actually is
+const caret  = { x: 0, y: 0, h: 0 };           // caret, in text coordinates
+const target = { x: 0, y: 0, h: 0 };           // where the caret is headed
+let frameId = null, lastFrame = 0;
+
+/* One rate for both. The caret's target and the view move in opposite
+   directions when a line wraps, and they only cancel out — keeping the caret
+   glued to its letter — if they travel at the same speed. */
+/* 18ms: the caret covers most of the distance inside a frame or two, so it
+   reads as movement rather than as a jump, but at 200 wpm it is never more
+   than a couple of pixels behind your fingers. Longer than about 25ms and a
+   fast typist can see it trailing. */
+const HALF_LIFE = 18;                              // milliseconds
+
+/* exponential approach: half the remaining distance every `half` ms */
+const approach = (cur, tgt, half, dt) => tgt + (cur - tgt) * Math.pow(2, -dt / half);
+
+function frame(now) {
+  if (now === undefined) {                     // called from an event: start one
+    if (frameId === null) { lastFrame = performance.now(); frameId = requestAnimationFrame(frame); }
+    return;
+  }
+  const dt = Math.min(now - lastFrame, 50);    // a dropped frame must not teleport
+  lastFrame = now;
+
+  if (config.smooth) {
+    view.x = approach(view.x, state.shift.x, HALF_LIFE, dt);
+    view.y = approach(view.y, state.shift.y, HALF_LIFE, dt);
+    caret.x = approach(caret.x, target.x, HALF_LIFE, dt);
+    caret.y = approach(caret.y, target.y, HALF_LIFE, dt);
+  } else {
+    view.x = state.shift.x; view.y = state.shift.y;
+    caret.x = target.x; caret.y = target.y;
+  }
+  caret.h = target.h;
+
+  const settled =
+    Math.abs(view.x - state.shift.x) < 0.3 && Math.abs(view.y - state.shift.y) < 0.3 &&
+    Math.abs(caret.x - target.x) < 0.3 && Math.abs(caret.y - target.y) < 0.3;
+  if (settled) {
+    view.x = state.shift.x; view.y = state.shift.y;
+    caret.x = target.x; caret.y = target.y;
+  }
+
+  /* Whole pixels: a fractional offset resamples every glyph, and a caret on a
+     half pixel is a two-pixel grey smear instead of a sharp bar. */
+  wordsEl.style.transform = (view.x || view.y)
+    ? `translate(${Math.round(view.x)}px, ${Math.round(view.y)}px)` : 'none';
+  caretEl.style.transform =
+    `translate(${Math.round(caret.x + view.x)}px, ${Math.round(caret.y + view.y)}px)`;
+  caretEl.style.height = `${Math.round(caret.h)}px`;
+
+  frameId = settled ? null : requestAnimationFrame(frame);
+}
+
+/* Jump both to their targets without animating — a new test, a resize. */
+function snapMotion() {
+  view.x = state.shift.x; view.y = state.shift.y;
+  caret.x = target.x; caret.y = target.y; caret.h = target.h;
+  frame();
+}
 
 /* Drop the words that have scrolled out of sight. In paragraph view only
    whole lines above the visible window go, and in tape view only words a
@@ -300,7 +398,6 @@ function scrollLines() {
   /* whole pixels only: a fractional offset resamples every glyph */
   const shift = Math.round(state.lineTops[Math.max(0, line - 1)] - state.lineTops[0]);
   state.shift = { x: 0, y: -shift };
-  wordsEl.style.transform = shift ? `translateY(${-shift}px)` : 'none';
 }
 
 function updateCaret() {
@@ -313,20 +410,36 @@ function updateCaret() {
      on the words container, so the caret lands correctly even while the view
      is still animating to its new position. Reading rects mid-transition put
      the caret wherever the animation happened to be that frame. */
+  /* Letter offsets are relative to the word, not to the test area: the word is
+     `position: relative` so it can carry the error underline, which makes it
+     the letters' offset parent. Both halves have to be added, or the caret
+     ends up at the top-left corner of the page instead of on the letter. */
   let x, y, h;
+  const ox = active.offsetLeft, oy = active.offsetTop;
   if (typedLen < letters.length) {
     const l = letters[typedLen];
-    x = l.offsetLeft; y = l.offsetTop; h = l.offsetHeight;
+    x = ox + l.offsetLeft; y = oy + l.offsetTop; h = l.offsetHeight;
   } else if (letters.length) {
     const l = letters[letters.length - 1];
-    x = l.offsetLeft + l.offsetWidth; y = l.offsetTop; h = l.offsetHeight;
+    x = ox + l.offsetLeft + l.offsetWidth; y = oy + l.offsetTop; h = l.offsetHeight;
   } else {
-    x = active.offsetLeft; y = active.offsetTop; h = active.offsetHeight;
+    x = ox; y = oy; h = active.offsetHeight;
   }
-  x += state.shift.x; y += state.shift.y;
+
   if (config.caret === 'underline') y += h * 0.82;
-  caretEl.style.height = `${h * 0.78}px`;
-  caretEl.style.transform = `translate(${x}px, ${y + h * 0.11}px)`;
+  /* Stored in the text's coordinates, without the scroll offset: the frame
+     adds the offset as it animates, which is what keeps the two locked. */
+  const nx = x, ny = y + h * 0.11;
+  const jumpedLine = Math.abs(ny - target.y) > 1;
+  const jumpedFar  = Math.abs(nx - caret.x) > areaEl.clientWidth * 0.3;
+  target.x = nx;
+  target.y = ny;
+  target.h = h * 0.78;
+  if (jumpedLine || jumpedFar) {        // a wrap: be there, do not travel there
+    caret.x = nx;
+    caret.y = ny;
+  }
+  frame();
 }
 
 /* ── 4. input ────────────────────────────────────────────────────── */
@@ -372,7 +485,7 @@ function typeChar(ch) {
     state.words[i] = state.typed[i];   // zen: the text is whatever you type
   }
   updateWord(i);
-  measureLines();
+  if (widthChanged(target || '', state.typed[i])) { measureLines(); scrollView(); }
   updateCaret();
 
   /* The last word of a finite test ends it the moment it is complete —
@@ -437,7 +550,7 @@ function backspace(whole) {
   state.typed[i] = whole ? '' : typed.slice(0, -1);
   if (config.mode === 'zen') state.words[i] = state.typed[i];
   updateWord(i);
-  measureLines();
+  if (widthChanged(state.words[i] || '', typed)) { measureLines(); scrollView(); }
   updateCaret();
   Sound.play('back');
 }
@@ -851,7 +964,7 @@ const FONTS = ['JetBrains Mono', 'Roboto Mono', 'IBM Plex Mono', 'Source Code Pr
 
 function applyConfig() {
   $('#zen-hint').hidden = !isEndless();
-  wordsEl.classList.toggle('tape', config.tape);
+  windowEl.classList.toggle('tape', config.tape);
   const root = document.documentElement.style;
   root.setProperty('--mono', config.font === 'system mono' ? 'ui-monospace' : `"${config.font}"`);
   root.setProperty('--font-weight', config.fontWeight);
@@ -1092,10 +1205,11 @@ document.addEventListener('mousemove', e => {
   document.body.classList.remove('typing');
 });
 document.addEventListener('pointerdown', () => Sound.unlock(), { once: true });
-window.addEventListener('resize', () => { measureLines(); scrollView(); updateCaret(); if (!resultsEl.hidden) drawChart(); });
+window.addEventListener('resize', () => { measureLines(); scrollView(); updateCaret(); snapMotion(); if (!resultsEl.hidden) drawChart(); });
 
 /* A read-only window into the engine, for the test harness. */
-window.__type = { get state() { return state; }, get config() { return config; } };
+window.__type = { get state() { return state; }, get config() { return config; },
+                  get motion() { return { view, caret, target, shift: state.shift }; } };
 
 /* go --------------------------------------------------------------- */
 applyConfig();

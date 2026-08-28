@@ -108,16 +108,22 @@ main {
   position: relative; outline: none; width: 100%;
   cursor: text;
 }
+/* The window and the text that slides through it have to be two elements.
+   A transform moves an element's clip box along with its content, so scrolling
+   the words by transforming the same box that clips them dragged the visible
+   window upwards over the wpm row. The window below never moves; only the
+   text inside it does. */
+.words-window {
+  max-height: calc(var(--font-size, 1.6rem) * 1.85 * 3);
+  overflow: hidden;
+}
 .words {
   display: flex; flex-wrap: wrap;
   font-family: var(--mono, "JetBrains Mono"), ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: var(--font-size, 1.6rem);
   font-weight: var(--font-weight, 500);
   line-height: 1.85;
-  max-height: calc(var(--font-size, 1.6rem) * 1.85 * 3);
-  overflow: hidden;
   user-select: none;
-  transition: transform .18s ease;
 }
 /* The error underline is drawn, not laid out. A real border adds 3px to every
    word box, which makes the three-line window 9px taller than the height it is
@@ -135,13 +141,12 @@ main {
 /* Tape: one straight line that slides sideways, the active word held in the
    middle of the screen. The container is the window; the line inside it is as
    long as the test. */
-.words.tape {
-  flex-wrap: nowrap;
+.words-window.tape {
   max-height: none;
   height: calc(var(--font-size, 1.6rem) * 1.85);
-  transition: transform .13s cubic-bezier(.22,.7,.3,1);
 }
-.words.tape .word { flex: 0 0 auto; }
+.words-window.tape .words { flex-wrap: nowrap; }
+.words-window.tape .word { flex: 0 0 auto; }
 .letter { color: var(--sub); transition: color .06s ease; }
 .letter.correct { color: var(--text); }
 .letter.incorrect { color: var(--err); }
@@ -156,7 +161,7 @@ main {
   will-change: transform;
   z-index: 2;
 }
-.caret.smooth { transition: transform .1s cubic-bezier(.2,.6,.3,1), height .1s ease; }
+/* Motion lives in the animation frame (see app.js), not here. */
 .caret.hidden { display: none; }
 [data-caret="underline"] .caret { width: 1.1ch; height: 3px !important; }
 [data-caret="block"]     .caret { width: 1.1ch; opacity: .45; }
