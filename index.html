@@ -4,12 +4,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>type</title>
-<meta name="description" content="A minimal, fast typing test — live WPM, accuracy, consistency and mechanical keyboard sounds.">
+<meta name="description" content="A minimal, fast, ad-free typing test — live WPM, accuracy, consistency, a leaderboard and synthesised mechanical keyboard sounds. No account, no tracking.">
+<meta name="theme-color" content="#323437">
+<meta property="og:title" content="type — a typing test">
+<meta property="og:description" content="A minimal, fast, ad-free typing test. Time, words, quotes, stories, zen and adaptive modes, a leaderboard, and mechanical keyboard sounds synthesised in the browser.">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Roboto+Mono:wght@400;500&family=IBM+Plex+Mono:wght@400;500&family=Source+Code+Pro:wght@400;500&family=Lexend+Deca:wght@400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/style.css">
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⌨️</text></svg>">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
 </head>
 <body>
 
@@ -26,6 +33,7 @@
   </a>
   <nav class="top-nav">
     <button class="icon-btn" data-action="palette" title="command palette (esc)">⌘</button>
+    <button class="icon-btn" data-action="leaderboard" title="leaderboard">🏆</button>
     <button class="icon-btn" data-action="stats" title="your results">📈</button>
     <button class="icon-btn" data-action="settings" title="settings">⚙</button>
   </nav>
@@ -51,6 +59,10 @@
     </div>
     <div class="config-sep" id="amount-sep"></div>
     <div class="config-group" id="amounts"></div>
+    <div class="config-sep" id="list-sep"></div>
+    <div class="config-group">
+      <button class="cfg" id="wordlist-btn" title="word list — click to change">english</button>
+    </div>
   </div>
 
   <!-- ── test ───────────────────────────────────────────────────── -->
@@ -62,6 +74,7 @@
     </div>
 
     <div id="typing-area" class="typing-area" tabindex="0">
+      <div id="pace-caret" class="pace-caret" hidden></div>
       <div id="caret" class="caret"></div>
       <div id="words-window" class="words-window"><div id="words" class="words"></div></div>
       <div id="outoffocus" class="outoffocus"><span>click here or press any key to focus</span></div>
@@ -108,9 +121,28 @@
       <div class="stat"><div class="stat-label">time</div><div class="stat-sub" id="r-time">0s</div></div>
     </div>
 
-    <div class="weak-keys" id="weak-keys" hidden>
-      <span class="weak-label">keys to work on</span>
-      <div class="weak-list" id="weak-list"></div>
+    <div class="lb-box" id="lb-box" hidden>
+      <div class="lb-status" id="lb-status"></div>
+      <div class="lb-form" id="lb-form" hidden>
+        <input id="lb-name" class="text-input" maxlength="20" placeholder="your name" autocomplete="off" spellcheck="false" aria-label="leaderboard name">
+        <button class="chip active" id="lb-submit">submit</button>
+        <button class="chip" id="lb-never" title="never ask again — you can turn it back on in settings">don't ask again</button>
+      </div>
+    </div>
+
+    <div class="word-stats">
+      <div class="weak-keys" id="weak-keys" hidden>
+        <span class="weak-label">keys to work on</span>
+        <div class="weak-list" id="weak-list"></div>
+      </div>
+      <div class="weak-keys" id="wrong-words" hidden>
+        <span class="weak-label">mistyped</span>
+        <div class="weak-list" id="wrong-list"></div>
+      </div>
+      <div class="weak-keys" id="slow-words" hidden title="the words that cost you the most time, with the speed you typed each one at">
+        <span class="weak-label">slowest words</span>
+        <div class="weak-list" id="slow-list"></div>
+      </div>
     </div>
 
     <div class="results-actions">
@@ -132,6 +164,7 @@
   <div class="footer-right">
     <button class="foot-btn" data-action="sound" id="sound-btn">🔊 <span id="sound-name">click</span></button>
     <button class="foot-btn" data-action="theme" id="theme-btn">🎨 <span id="theme-name">serika dark</span></button>
+    <a class="foot-btn" href="https://github.com/niraj-envision/type" target="_blank" rel="noopener" title="source code">no ads · no trackers · open source</a>
   </div>
 </footer>
 
@@ -165,6 +198,10 @@
       <div class="chips" id="set-errorsound"></div>
     </div>
     <div class="setting">
+      <div class="setting-text"><h3>word list</h3><p>what the generated modes draw from: the english 400, the english 1k, or code.</p></div>
+      <div class="chips" id="set-list"></div>
+    </div>
+    <div class="setting">
       <div class="setting-text"><h3>theme</h3><p>colours for the whole page.</p></div>
       <div class="chips" id="set-theme"></div>
     </div>
@@ -175,6 +212,13 @@
     <div class="setting">
       <div class="setting-text"><h3>smooth caret</h3><p>animate the caret between letters.</p></div>
       <div class="chips" id="set-smooth"></div>
+    </div>
+    <div class="setting">
+      <div class="setting-text"><h3>pace caret</h3><p>a second, dimmer caret that moves at a steady speed — your personal best for this test, your last run, or a number you choose.</p></div>
+      <div class="chips-col">
+        <div class="chips" id="set-pace"></div>
+        <label class="inline-label">custom <input type="number" id="set-pacewpm" class="text-input num-input" min="10" max="400" step="5"> wpm</label>
+      </div>
     </div>
     <div class="setting">
       <div class="setting-text"><h3>stop on error</h3><p>refuse the keypress, or stop at the end of a wrong word.</p></div>
@@ -204,6 +248,21 @@
       <div class="setting-text"><h3>font size</h3><p>size of the test text.</p></div>
       <div class="chips" id="set-fontsize"></div>
     </div>
+    <div class="setting">
+      <div class="setting-text"><h3>leaderboard</h3><p id="set-leaderboard-note"></p></div>
+      <div class="chips" id="set-leaderboard"></div>
+    </div>
+    <div class="setting">
+      <div class="setting-text"><h3>leaderboard name</h3><p>the name shown next to your runs. nothing else about you is sent.</p></div>
+      <input type="text" id="set-name" class="text-input" maxlength="20" placeholder="anonymous" autocomplete="off" spellcheck="false">
+    </div>
+    <div class="setting">
+      <div class="setting-text"><h3>your data</h3><p>results, personal bests and per-key history live only in this browser. take them with you as a file, or bring a file back.</p></div>
+      <div class="chips">
+        <button class="chip" id="set-export">export</button>
+        <label class="chip file-chip">import <input type="file" id="set-import" accept="application/json,.json"></label>
+      </div>
+    </div>
     <div class="setting danger">
       <div class="setting-text"><h3>reset everything</h3><p>clears your results, personal bests and per-key history.</p></div>
       <button class="chip danger-chip" id="set-reset">reset</button>
@@ -220,15 +279,41 @@
     <canvas id="history-chart" width="1000" height="220"></canvas>
     <h3 class="section-title">per-key accuracy</h3>
     <div class="keyboard-heat" id="keyboard-heat"></div>
+    <div class="table-scroll">
     <table class="history-table"><thead>
       <tr><th>wpm</th><th>raw</th><th>acc</th><th>consistency</th><th>mode</th><th>when</th></tr>
     </thead><tbody id="history-body"></tbody></table>
+    </div>
   </div>
 </div>
 
+<!-- ── leaderboard drawer ───────────────────────────────────────── -->
+<div id="leaderboard" class="drawer" hidden>
+  <div class="drawer-box">
+    <div class="drawer-head"><h2>leaderboard</h2><button class="icon-btn" data-close="leaderboard">✕</button></div>
+    <div class="lb-controls">
+      <div class="chips left" id="lb-boards"></div>
+      <div class="chips left" id="lb-periods"></div>
+    </div>
+    <p class="lb-note" id="lb-note"></p>
+    <div class="table-scroll">
+    <table class="history-table lb-table"><thead>
+      <tr><th class="rank">#</th><th>name</th><th class="num">wpm</th><th class="num">acc</th><th class="num">raw</th><th class="num">consistency</th><th>when</th></tr>
+    </thead><tbody id="lb-body"></tbody></table>
+    </div>
+    <div class="lb-foot">
+      <label class="inline-label">your name <input type="text" id="lb-drawer-name" class="text-input" maxlength="20" placeholder="anonymous" autocomplete="off" spellcheck="false"></label>
+      <span class="dim">runs are posted from the results screen. one entry per browser per board — a better run replaces your older one.</span>
+    </div>
+  </div>
+</div>
+
+<script src="js/config.js"></script>
 <script src="js/words.js"></script>
 <script src="js/stories.js"></script>
+<script src="js/replay.js"></script>
 <script src="js/sound.js"></script>
+<script src="js/leaderboard.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

@@ -1,0 +1,40 @@
+# Publishes the site to GitHub Pages on every push to main.
+#
+# One-time setup: in the repository settings, under Pages, set the source to
+# "GitHub Actions". After that the site is live at
+#   https://<user>.github.io/<repo>/
+# and a custom domain (a free js.org / is-a.dev subdomain, or one you own)
+# can be added on the same settings page.
+#
+# The site has no build step, so the repository root is uploaded as is;
+# everything the page needs is a static file.
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -3,12 +3,13 @@
 
    Layout of this file:
      1. config + storage        persisted settings, results, per-key stats
-     2. word generation         english / code / quotes / adaptive
-     3. rendering               words, caret, line scrolling
-     4. input                   keydown, space, backspace rules
-     5. timing + statistics     wpm, raw, accuracy, consistency
+     2. word generation         english / english 1k / code / quotes / adaptive
+     3. rendering               words, caret, pace caret, line scrolling
+     4. input                   keydown, the mobile input path, space, backspace
+     5. timing + statistics     wpm, raw, accuracy, consistency, the keystroke log
      6. results + charts        canvas, drawn by hand, no chart library
-     7. ui                      config bar, settings, stats, palette
+     7. leaderboard             the results prompt and the drawer
+     8. ui                      config bar, settings, stats, palette, drawers
    ───────────────────────────────────────────────────────────────── */
 (() => {
 'use strict';
@@ -17,17 +18,22 @@
 
 const DEFAULTS = {
   mode: 'time', time: 30, wordCount: 25, quoteLength: 'medium',
-  punctuation: false, numbers: false,
+  punctuation: false, numbers: false, wordList: 'english',
   theme: 'serika-dark', sound: 'click', volume: 35, errorSound: true,
   caret: 'line', smooth: true, stopOnError: 'off',
   blind: false, liveWpm: true, fontSize: 1.6,
   spaceSound: 'same', font: 'JetBrains Mono', fontWeight: 500,
-  tape: false, storyLength: 'medium'
+  tape: false, storyLength: 'medium',
+  pace: 'off', paceWpm: 60,               // a ghost caret: off | pb | last | custom
+  leaderboard: 'ask', name: ''            // ask | on | off
 };
 
 /* Modes with no finish line of their own: they run until you stop them. */
 const ENDLESS = ['infinite', 'zen', 'adaptive'];
-const isEndless = () => ENDLESS.includes(config.mode);
+const FINITE  = ['words', 'quote', 'story'];
+const GENERATED = ['time', 'words', 'infinite', 'adaptive'];   // built from a word list
+const isEndless   = () => ENDLESS.includes(config.mode);
+const isGenerated = () => GENERATED.includes(config.mode);
 
 const store = {
   get(key, fallback) {
@@ -41,6 +47,7 @@ const store = {
 };
 
 const config  = Object.assign({}, DEFAULTS, store.get('config', {}));
+if (!WORDS.lists[config.wordList]) config.wordList = 'english';
 let history   = store.get('history', []);
 let pb        = store.get('pb', {});
 let keyStats  = store.get('keys', {});   // { a: {n, err}, … }
@@ -55,9 +62,12 @@ const state = {
   timerId: null, rafId: null,
   keys: { correct: 0, incorrect: 0, extra: 0, missed: 0 },
   perSecond: [], lastSampleChars: 0, lastSampleErrors: 0, secondsElapsed: 0,
-  quote: null, lineTops: [], suppressInput: false,
+  quote: null, lineTops: [],
   shift: { x: 0, y: 0 },         // where the view has scrolled the words to
-  domOffset: 0                   // index of the first word still in the DOM
+  domOffset: 0,                  // index of the first word still in the DOM
+  log: [],                       // every keystroke of this run, see replay.js
+  result: null,                  // the finished run, for sharing and submitting
+  elapsed: 0                     // its length in seconds, to the millisecond
 };
 
 const $  = s => document.querySelector(s);
@@ -66,6 +76,7 @@ const $$ = s => Array.from(document.querySelectorAll(s));
 const wordsEl   = $('#words');
 const windowEl  = $('#words-window');
 const caretEl   = $('#caret');
+const paceEl    = $('#pace-caret');
 const areaEl    = $('#typing-area');
 const inputEl   = $('#hidden-input');
 const counterEl = $('#live-counter');
@@ -106,7 +117,9 @@ function decorate(words) {
       continue;
     }
     if (config.punctuation) {
-      if (i === 0 || /[.!?]$/.test(out[i - 1] || '')) out[i] = out[i][0].toUpperCase() + out[i].slice(1);
+      /* a new sentence after . ! ? — also when the previous word closed a
+         quote or a bracket, as in `said."` */
+      if (i === 0 || /[.!?]["')]?$/.test(out[i - 1] || '')) out[i] = out[i][0].toUpperCase() + out[i].slice(1);
       const r = Math.random();
       if (r < 0.04)      out[i] = '"' + out[i] + '"';
       else if (r < 0.07) out[i] = '(' + out[i] + ')';
@@ -119,13 +132,15 @@ function decorate(words) {
   return out;
 }
 
+const wordList = () => WORDS.lists[config.wordList] || WORDS.english;
+
 function makeWords(n) {
-  const list = config.mode === 'code' ? WORDS.code : WORDS.english;
+  const list = wordList();
   const raw = [];
   let last = '';
   for (let i = 0; i < n; i++) {
     let w;
-    do { w = config.mode === 'adaptive' ? adaptivePick(list) : rnd(list); } while (w === last);
+    do { w = config.mode === 'adaptive' ? adaptivePick(list) : rnd(list); } while (w === last && list.length > 1);
     last = w;
     raw.push(w);
   }
@@ -187,6 +202,7 @@ function topUp() {
 /* ── 3. rendering ────────────────────────────────────────────────── */
 
 const esc = c => c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '&' ? '&amp;' : c;
+const escText = s => String(s).replace(/[<>&"]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[c]));
 
 function wordHTML(i) {
   const target = state.words[i] || '';
@@ -400,31 +416,31 @@ function scrollLines() {
   state.shift = { x: 0, y: -shift };
 }
 
+/* Where a letter sits, in the text's own coordinates. Layout offsets, not
+   bounding rects: offsetLeft/Top ignore the transform on the words
+   container, so the position is right even while the view is still
+   animating. Letter offsets are relative to the word (it is
+   `position: relative` for the error underline), so both halves are added. */
+function letterPos(active, index) {
+  const letters = active.children;
+  const ox = active.offsetLeft, oy = active.offsetTop;
+  if (index < letters.length) {
+    const l = letters[index];
+    return { x: ox + l.offsetLeft, y: oy + l.offsetTop, h: l.offsetHeight };
+  }
+  if (letters.length) {
+    const l = letters[letters.length - 1];
+    return { x: ox + l.offsetLeft + l.offsetWidth, y: oy + l.offsetTop, h: l.offsetHeight };
+  }
+  return { x: ox, y: oy, h: active.offsetHeight };
+}
+
 function updateCaret() {
   const active = wordEl(state.wordIndex);
   if (!active) { caretEl.classList.add('hidden'); return; }
   caretEl.classList.remove('hidden');
   const typedLen = (state.typed[state.wordIndex] || '').length;
-  const letters  = active.children;
-  /* Layout offsets, not bounding rects: offsetLeft/Top ignore the transform
-     on the words container, so the caret lands correctly even while the view
-     is still animating to its new position. Reading rects mid-transition put
-     the caret wherever the animation happened to be that frame. */
-  /* Letter offsets are relative to the word, not to the test area: the word is
-     `position: relative` so it can carry the error underline, which makes it
-     the letters' offset parent. Both halves have to be added, or the caret
-     ends up at the top-left corner of the page instead of on the letter. */
-  let x, y, h;
-  const ox = active.offsetLeft, oy = active.offsetTop;
-  if (typedLen < letters.length) {
-    const l = letters[typedLen];
-    x = ox + l.offsetLeft; y = oy + l.offsetTop; h = l.offsetHeight;
-  } else if (letters.length) {
-    const l = letters[letters.length - 1];
-    x = ox + l.offsetLeft + l.offsetWidth; y = oy + l.offsetTop; h = l.offsetHeight;
-  } else {
-    x = ox; y = oy; h = active.offsetHeight;
-  }
+  let { x, y, h } = letterPos(active, typedLen);
 
   if (config.caret === 'underline') y += h * 0.82;
   /* Stored in the text's coordinates, without the scroll offset: the frame
@@ -442,13 +458,68 @@ function updateCaret() {
   frame();
 }
 
+/* ── pace caret ────────────────────────────────────────────────────
+   A second, dimmer caret that moves through the text at a fixed speed —
+   your personal best for this test, your last run, or a number you pick.
+   It is positioned every frame from the clock, so it never stutters and
+   never has to be caught up. */
+function paceWpm() {
+  if (config.pace === 'off' || config.mode === 'zen') return 0;
+  if (config.pace === 'custom') return +config.paceWpm || 0;
+  const key = modeKey();
+  if (config.pace === 'pb') return (pb[key] || {}).wpm || 0;
+  if (config.pace === 'last') return (history.find(r => r.key === key) || {}).wpm || 0;
+  return 0;
+}
+
+function updatePace() {
+  const wpm = state.started && !state.finished ? paceWpm() : 0;
+  if (!wpm) { paceEl.hidden = true; return; }
+  const chars = wpm * 5 * (performance.now() - state.startTime) / 60000;
+  let i = 0, cum = 0;
+  for (; i < state.words.length; i++) {
+    const len = state.words[i].length + 1;               // + the space
+    if (chars < cum + len) break;
+    cum += len;
+  }
+  const el = wordEl(i);
+  if (!el) { paceEl.hidden = true; return; }              // pruned, or off the end
+  const { x, y, h } = letterPos(el, Math.floor(chars - cum));
+  paceEl.hidden = false;
+  paceEl.style.transform = `translate(${Math.round(x + view.x)}px, ${Math.round(y + h * 0.11 + view.y)}px)`;
+  paceEl.style.height = `${Math.round(h * 0.78)}px`;
+}
+
 /* ── 4. input ────────────────────────────────────────────────────── */
 
-const MAX_EXTRA = 10;
+const MAX_EXTRA = Replay.MAX_EXTRA;
+
+/* Every key that changes the test goes into the log, stamped in
+   milliseconds since the first keystroke — see replay.js for the format. */
+function logKey(k, refused) {
+  const t = Math.round(performance.now() - state.startTime);
+  state.log.push(refused ? [t, k, 'r'] : [t, k]);
+}
+
+/* The hidden input mirrors the word being typed. On a desktop keyboard the
+   keydown handler does all the work and this only keeps the two in step;
+   on a phone the keyboard edits the input and the `input` handler below
+   works out what changed. */
+function syncInput() {
+  const v = state.typed[state.wordIndex] || '';
+  if (inputEl.value !== v) inputEl.value = v;
+}
+
+/* Chrome fades back in on any mouse movement; the next keystroke takes it
+   away again, so a nudge of the mouse does not cost the rest of the test. */
+function focusMode() {
+  if (state.started && !document.body.classList.contains('typing')) document.body.classList.add('typing');
+}
 
 function typeChar(ch) {
   if (state.finished) return;
   if (!state.started) start();
+  focusMode();
 
   if (config.mode === 'zen' && state.words.length === 0) {
     state.words.push(''); appendWords(['']);
@@ -467,10 +538,12 @@ function typeChar(ch) {
   if (!correct && config.stopOnError === 'letter') {
     state.keys.incorrect++;
     trackKey(expected, false);
+    logKey(ch, true);
     Sound.play('error');
     return;
   }
 
+  logKey(ch);
   state.typed[i] = typed + ch;
   if (target !== null && typed.length >= target.length) state.keys.extra++;
   else if (correct) state.keys.correct++;
@@ -487,6 +560,7 @@ function typeChar(ch) {
   updateWord(i);
   if (widthChanged(target || '', state.typed[i])) { measureLines(); scrollView(); }
   updateCaret();
+  syncInput();
 
   /* The last word of a finite test ends it the moment it is complete —
      nobody types a trailing space at the end of a quote. */
@@ -502,6 +576,7 @@ function isLastWord(i) {
 function typeSpace() {
   if (state.finished) return;
   if (!state.started) start();
+  focusMode();
   const i = state.wordIndex;
   const typed = state.typed[i] || '';
   if (!typed.length) return;                       // no empty words
@@ -510,6 +585,7 @@ function typeSpace() {
 
   if (config.stopOnError === 'word' && typed !== target) { Sound.play('error'); return; }
 
+  logKey(' ');
   if (typed === target) state.keys.correct++; else state.keys.incorrect++;
   if (typed.length < target.length) state.keys.missed += target.length - typed.length;
 
@@ -528,10 +604,11 @@ function typeSpace() {
   prune();
   scrollView();
   updateCaret();
+  syncInput();
 }
 
 function backspace(whole) {
-  if (state.finished) return;
+  if (state.finished || !state.started) return;
   const i = state.wordIndex;
   const typed = state.typed[i] || '';
 
@@ -539,49 +616,71 @@ function backspace(whole) {
     if (i === 0) return;
     const prev = state.typed[i - 1] || '';
     if (config.mode !== 'zen' && prev === state.words[i - 1]) return;  // correct words are locked
+    logKey(whole ? Replay.WORD_BACK : Replay.BACK);
     state.wordIndex--;
-    updateWord(i - 1);
     if (whole) state.typed[i - 1] = '';
     updateWord(i - 1);
-    scrollView(); updateCaret();
+    scrollView(); updateCaret(); syncInput();
     Sound.play('back');
     return;
   }
+  logKey(whole ? Replay.WORD_BACK : Replay.BACK);
   state.typed[i] = whole ? '' : typed.slice(0, -1);
   if (config.mode === 'zen') state.words[i] = state.typed[i];
   updateWord(i);
   if (widthChanged(state.words[i] || '', typed)) { measureLines(); scrollView(); }
   updateCaret();
+  syncInput();
   Sound.play('back');
 }
 
+const drawerOpen = () => ['settings', 'stats', 'leaderboard'].some(id => !$('#' + id).hidden);
+const isEditable = el => el && el !== inputEl && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
+
 function onKeyDown(e) {
-  if (!$('#palette').hidden || !$('#settings').hidden || !$('#stats').hidden) return;
+  /* A drawer takes every key: esc closes it, the rest is its own business.
+     Handling esc here — and only here — is what stops it from also opening
+     the command palette on the way out. */
+  if (drawerOpen()) {
+    if (e.key === 'Escape') { e.preventDefault(); closeDrawers(); }
+    return;
+  }
+  if (!$('#palette').hidden) return;            // the palette has its own handler
+  if (isEditable(e.target)) return;             // a text field on the results screen
   if (e.key === 'Tab')     { e.preventDefault(); return restart(); }
   if (e.key === 'Escape')  { e.preventDefault(); return openPalette(); }
-  if (e.key === 'CapsLock' || e.getModifierState) {
-    $('#capslock').hidden = !e.getModifierState('CapsLock');
-  }
+  if (e.getModifierState) $('#capslock').hidden = !e.getModifierState('CapsLock');
   if (e.altKey || e.metaKey) return;
-  if (e.key === 'Backspace') { e.preventDefault(); state.suppressInput = true; return backspace(e.ctrlKey); }
+  if (e.key === 'Backspace') { e.preventDefault(); return backspace(e.ctrlKey); }
   if (e.ctrlKey) return;
-  if (e.key === ' ')       { e.preventDefault(); state.suppressInput = true; return typeSpace(); }
+  if (e.key === ' ')       { e.preventDefault(); return typeSpace(); }
   if (e.key === 'Enter') {
     if (isEndless() && e.shiftKey) { e.preventDefault(); return finish(); }
     if (config.mode === 'zen') { e.preventDefault(); return typeSpace(); }
+    return;
   }
-  if (e.key.length === 1)  { e.preventDefault(); state.suppressInput = true; return typeChar(e.key); }
+  if (e.key.length === 1)  { e.preventDefault(); return typeChar(e.key); }
 }
 
-/* mobile keyboards fire `input`, not usable keydowns */
-inputEl.addEventListener('input', e => {
-  const data = e.data;
-  inputEl.value = '';
-  if (state.suppressInput) { state.suppressInput = false; return; }
-  if (!data) return;
-  for (const ch of data) ch === ' ' ? typeSpace() : typeChar(ch);
+/* Phone keyboards do not send usable keydowns — Android reports every key
+   as `Unidentified` and composes words through the IME. So the input is
+   left to take the edit, and what changed is read off its value: the
+   letters after the common prefix were typed, anything of the old word
+   past it was deleted. A space commits the word. */
+inputEl.addEventListener('input', () => {
+  if (state.finished) { inputEl.value = ''; return; }
+  const v = inputEl.value;
+  const prev = state.typed[state.wordIndex] || '';
+  if (v === prev) return;
+  let common = 0;
+  while (common < v.length && common < prev.length && v[common] === prev[common]) common++;
+  for (let k = prev.length; k > common; k--) backspace(false);
+  for (const ch of v.slice(common)) {
+    if (state.finished) break;
+    if (ch === ' ' || ch === '\n') typeSpace(); else if (ch.length === 1) typeChar(ch);
+  }
+  syncInput();
 });
-document.addEventListener('keyup', () => { state.suppressInput = false; });
 
 /* ── 5. timing + statistics ──────────────────────────────────────── */
 
@@ -601,7 +700,8 @@ function correctChars() {
   return n;
 }
 
-const minutes = () => Math.max((performance.now() - state.startTime) / 60000, 1 / 60000);
+const elapsedMs = () => performance.now() - state.startTime;
+const minutes = () => Math.max(elapsedMs() / 60000, 1 / 60000);
 const liveWpm = () => Math.round(correctChars() / 5 / minutes());
 
 function start() {
@@ -609,12 +709,37 @@ function start() {
   state.startTime = performance.now();
   document.body.classList.add('typing');
   areaEl.classList.remove('unfocused');
-  state.timerId = setInterval(tick, 1000);
+  scheduleTick();
   loop();
 }
 
+/* The clock is the wall clock, not a count of timer callbacks. setInterval
+   drifts a few milliseconds a second and a background tab throttles it to
+   a crawl; both used to make a 60-second test run long. Each tick is now
+   scheduled for the next whole second after the first keystroke, and if
+   the browser was late it catches up. */
+function scheduleTick() {
+  const due = state.startTime + (state.secondsElapsed + 1) * 1000;
+  state.timerId = setTimeout(tick, Math.max(0, due - performance.now()));
+}
+
 function tick() {
-  state.secondsElapsed++;
+  if (state.finished || !state.started) return;
+  const due = Math.floor(elapsedMs() / 1000);
+  while (state.secondsElapsed < due) {
+    state.secondsElapsed++;
+    sample();
+    if (config.mode === 'time' && state.secondsElapsed >= config.time) break;
+  }
+  if (config.mode === 'time') {
+    const left = config.time - state.secondsElapsed;
+    counterEl.textContent = Math.max(0, left);
+    if (left <= 0) return finish();
+  }
+  scheduleTick();
+}
+
+function sample() {
   const chars  = typedChars();
   const errors = state.keys.incorrect + state.keys.extra;
   state.perSecond.push({
@@ -625,12 +750,6 @@ function tick() {
   });
   state.lastSampleChars = chars;
   state.lastSampleErrors = errors;
-
-  if (config.mode === 'time') {
-    const left = config.time - state.secondsElapsed;
-    counterEl.textContent = Math.max(0, left);
-    if (left <= 0) finish();
-  }
 }
 
 function loop() {
@@ -641,6 +760,7 @@ function loop() {
     liveWpmEl.textContent = liveWpm() + ' wpm';
   }
   if (config.mode !== 'time') counterEl.textContent = progressLabel();
+  updatePace();
   state.rafId = requestAnimationFrame(loop);
 }
 
@@ -651,7 +771,7 @@ function progressLabel() {
   /* Endless: there is no target to count down to, so count up — elapsed
      time, and how many words you have put behind you. */
   if (!state.started) return '0:00';
-  const secs = Math.floor((performance.now() - state.startTime) / 1000);
+  const secs = Math.floor(elapsedMs() / 1000);
   return `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')} · ${state.wordIndex}`;
 }
 
@@ -663,31 +783,21 @@ function trackKey(ch, ok) {
   s.n++; if (!ok) s.err++;
 }
 
-function stddev(xs) {
-  if (xs.length < 2) return 0;
-  const m = xs.reduce((a, b) => a + b, 0) / xs.length;
-  return Math.sqrt(xs.reduce((a, b) => a + (b - m) ** 2, 0) / xs.length);
-}
-
-function consistency(samples) {
-  const raws = samples.map(s => s.raw).filter(r => r > 0);
-  if (raws.length < 2) return 100;
-  const mean = raws.reduce((a, b) => a + b, 0) / raws.length;
-  if (!mean) return 0;
-  return Math.max(0, Math.min(100, Math.round((1 - stddev(raws) / mean) * 100)));
-}
-
 /* ── 6. results + charts ─────────────────────────────────────────── */
 
 function finish() {
   if (state.finished || !state.started) return;
   state.finished = true;
   state.endTime = performance.now();
-  clearInterval(state.timerId);
+  clearTimeout(state.timerId);
   cancelAnimationFrame(state.rafId);
   document.body.classList.remove('typing');
+  paceEl.hidden = true;
+  inputEl.value = '';
 
-  const secs = Math.max((state.endTime - state.startTime) / 1000, 0.001);
+  /* whole milliseconds: the evidence sent to the leaderboard carries this same
+     number, so the server's replay lands on exactly the same wpm */
+  const secs = Math.max(Math.round(state.endTime - state.startTime) / 1000, 0.001);
   const mins = secs / 60;
   const correct = correctChars();
   const all = typedChars();
@@ -698,7 +808,7 @@ function finish() {
     wpm: Math.round(correct / 5 / mins),
     raw: Math.round(all / 5 / mins),
     acc: attempts ? Math.round((k.correct / attempts) * 1000) / 10 : 0,
-    consistency: consistency(state.perSecond),
+    consistency: Replay.consistency(state.perSecond.map(s => s.raw)),
     chars: `${k.correct}/${k.incorrect}/${k.extra}/${k.missed}`,
     seconds: Math.round(secs * 10) / 10,
     mode: modeLabel(),
@@ -716,8 +826,11 @@ function finish() {
   history = history.slice(0, 100);
   store.set('history', history);
   store.set('keys', keyStats);
+  state.result = result;
+  state.elapsed = secs;
 
   showResults(result, isPb);
+  offerLeaderboard(result, secs);
 }
 
 function modeLabel() {
@@ -729,13 +842,28 @@ function modeLabel() {
   if (config.mode === 'infinite') return 'infinite';
   return 'adaptive';
 }
+/* The key a personal best is filed under. Punctuation, numbers and a
+   different word list each make a different test, so each gets its own. */
 function modeKey() {
-  const extra = (config.punctuation ? '+p' : '') + (config.numbers ? '+n' : '');
+  const extra = !isGenerated() ? ''
+    : (config.punctuation ? '+p' : '') + (config.numbers ? '+n' : '') +
+      (config.wordList !== 'english' ? '@' + config.wordList.replace(/\s+/g, '') : '');
   if (config.mode === 'time')  return `time-${config.time}${extra}`;
   if (config.mode === 'words') return `words-${config.wordCount}${extra}`;
   if (config.mode === 'quote') return `quote-${config.quoteLength}`;
   if (config.mode === 'story') return `story-${config.storyLength}`;
-  return config.mode;
+  return config.mode + extra;
+}
+const keyLabel = k => k.replace(/@/, ' · ').replace(/-/g, ' ').replace(/\+p/, ' punct').replace(/\+n/, ' num');
+
+function typeLabel() {
+  const parts = [modeLabel()];
+  if (isGenerated()) {
+    if (config.wordList !== 'english') parts.push(config.wordList);
+    if (config.punctuation) parts.push('punct');
+    if (config.numbers) parts.push('num');
+  }
+  return parts.join(' · ');
 }
 
 function showResults(r, isPb) {
@@ -745,7 +873,7 @@ function showResults(r, isPb) {
   $('#r-wpm').textContent = r.wpm;
   $('#r-acc').textContent = r.acc + '%';
   $('#r-pb').hidden = !isPb;
-  $('#r-type').textContent = r.mode + (config.punctuation ? ' punct' : '') + (config.numbers ? ' num' : '');
+  $('#r-type').textContent = typeLabel();
   $('#r-raw').textContent = r.raw;
   $('#r-chars').textContent = r.chars;
   $('#r-consistency').textContent = r.consistency + '%';
@@ -755,6 +883,7 @@ function showResults(r, isPb) {
     : 'quote — ' + state.quote.source;
   drawChart();
   showWeakKeys();
+  showWordStats();
 }
 
 function showWeakKeys() {
@@ -765,7 +894,34 @@ function showWeakKeys() {
     .slice(0, 6);
   $('#weak-keys').hidden = weak.length === 0;
   $('#weak-list').innerHTML = weak
-    .map(w => `<span class="weak-key">${w.ch} <small>${Math.round(w.rate * 100)}%</small></span>`).join('');
+    .map(w => `<span class="weak-key">${escText(w.ch)} <small>${Math.round(w.rate * 100)}%</small></span>`).join('');
+}
+
+/* Which words went wrong, and which ones were slow — the words are where
+   the time goes, and a list of them is the most useful thing a results
+   screen can say. */
+function showWordStats() {
+  const wrong = [];
+  for (let i = 0; i < state.wordIndex; i++) {
+    const t = state.words[i], k = state.typed[i];
+    if (t && k !== undefined && k !== t && !wrong.includes(t)) wrong.push(t);
+  }
+  const wrongEl = $('#wrong-words');
+  wrongEl.hidden = wrong.length === 0;
+  $('#wrong-list').innerHTML = wrong.slice(0, 12)
+    .map(w => `<span class="stat-word err">${escText(w)}</span>`).join('') +
+    (wrong.length > 12 ? `<span class="stat-more">+${wrong.length - 12} more</span>` : '');
+
+  const times = Replay.wordTimes(state.words, state.log)
+    .filter(w => w.word.length >= 3 && w.ms > 0)
+    .map(w => ({ ...w, wpm: Math.round((w.word.length + 1) / 5 / (w.ms / 60000)) }))
+    .sort((a, b) => a.wpm - b.wpm);
+  const slow = [];
+  for (const w of times) { if (!slow.some(s => s.word === w.word)) slow.push(w); if (slow.length === 5) break; }
+  const slowEl = $('#slow-words');
+  slowEl.hidden = slow.length < 3;
+  $('#slow-list').innerHTML = slow
+    .map(w => `<span class="stat-word">${escText(w.word)} <small>${w.wpm}</small></span>`).join('');
 }
 
 /* Hand-drawn canvas chart: wpm line, raw line, error crosses. */
@@ -878,7 +1034,139 @@ function drawHistoryChart() {
   });
 }
 
-/* ── 7. ui ───────────────────────────────────────────────────────── */
+/* ── 7. leaderboard ──────────────────────────────────────────────── */
+
+/* Everything the server needs to check the run for itself: the words,
+   the keystroke log, and the numbers we came up with. */
+function evidence(result, secs) {
+  const total = config.mode === 'words' ? config.wordCount : 0;
+  return {
+    v: 1,
+    board: Leaderboard.boardFor(config),
+    name: Leaderboard.cleanName(config.name),
+    device: Leaderboard.device(),
+    mode: config.mode, time: config.time, wordCount: config.wordCount,
+    list: config.wordList, punctuation: config.punctuation, numbers: config.numbers,
+    stopOnError: config.stopOnError,
+    words: state.words.slice(0, Math.max(state.wordIndex + 1, total)),
+    log: state.log,
+    seconds: secs,
+    claimed: { wpm: result.wpm, raw: result.raw, acc: result.acc, consistency: result.consistency, chars: result.chars },
+    date: result.date
+  };
+}
+
+const lbBox = $('#lb-box');
+const setLbStatus = (html, cls) => { const el = $('#lb-status'); el.innerHTML = html; el.className = 'lb-status ' + (cls || ''); };
+
+function offerLeaderboard(result, secs) {
+  lbBox.hidden = true;
+  $('#lb-form').hidden = true;
+  setLbStatus('');
+  const board = Leaderboard.boardFor(config);
+  if (!Leaderboard.enabled || !board || config.leaderboard === 'off') return;
+  if (result.acc < Leaderboard.MIN_ACC) {
+    lbBox.hidden = false;
+    setLbStatus(`🏆 <b>${Leaderboard.label(board)}</b> leaderboard needs ${Leaderboard.MIN_ACC}% accuracy — this run had ${result.acc}%`, 'dim');
+    return;
+  }
+  const payload = evidence(result, secs);
+  lbBox.hidden = false;
+  if (config.leaderboard === 'on' && payload.name) { submitRun(payload); return; }
+  $('#lb-form').hidden = false;
+  $('#lb-name').value = config.name || '';
+  setLbStatus(`🏆 this run qualifies for the <b>${Leaderboard.label(board)}</b> leaderboard`);
+  $('#lb-submit').onclick = () => {
+    const name = Leaderboard.cleanName($('#lb-name').value);
+    if (!name) { $('#lb-name').focus(); return; }
+    config.name = name; config.leaderboard = 'on'; saveConfig();
+    payload.name = name;
+    $('#lb-form').hidden = true;
+    submitRun(payload, true);
+  };
+  $('#lb-never').onclick = () => { config.leaderboard = 'off'; saveConfig(); lbBox.hidden = true; inputEl.focus({ preventScroll: true }); };
+}
+
+async function submitRun(payload, first) {
+  setLbStatus('submitting to the leaderboard…', 'dim');
+  try {
+    const r = await Leaderboard.submit(payload);
+    const board = Leaderboard.label(payload.board);
+    const pos = [];
+    if (r.rankDay)  pos.push(`<b>#${r.rankDay}</b> today`);
+    if (r.rankAll)  pos.push(`<b>#${r.rankAll}</b> all time`);
+    const note = r.best === false ? ' · not your best on this board, so the board keeps your better run' : '';
+    setLbStatus(`🏆 ${board}: ${pos.join(' · ')}${note}` +
+      (first ? '<br><small>future runs are submitted automatically — change that in settings</small>' : ''));
+    lbBox.onclick = null;
+  } catch (e) {
+    setLbStatus(e.refused ? `the leaderboard did not accept this run: ${escText(e.message)}`
+                          : `could not reach the leaderboard: ${escText(e.message)}`, 'err');
+  }
+}
+
+/* the drawer */
+let lbBoard = 'time-30', lbPeriod = 'all';
+
+function pickBoard() {
+  const b = Leaderboard.boardFor(config);
+  if (b) lbBoard = b;
+}
+
+function renderLeaderboard() {
+  chips('#lb-boards', Leaderboard.BOARDS, lbBoard, v => { lbBoard = v; }, Leaderboard.label, { rerender: renderLeaderboard, silent: true });
+  chips('#lb-periods', ['day', 'all'], lbPeriod, v => { lbPeriod = v; }, v => v === 'day' ? 'last 24 hours' : 'all time', { rerender: renderLeaderboard, silent: true });
+  const nameEl = $('#lb-drawer-name');
+  nameEl.value = config.name || '';
+  const body = $('#lb-body'), note = $('#lb-note');
+
+  if (!Leaderboard.enabled) {
+    const rows = Leaderboard.localBoard(history, lbBoard);
+    note.innerHTML = 'no global leaderboard is configured for this copy of the site, so this is <b>your best runs on this device</b>. ' +
+      'to rank against other people, deploy the free worker in <code>worker/</code> and put its URL in <code>js/config.js</code>.';
+    body.innerHTML = rows.length ? rows.map((r, i) => lbRow(i + 1, config.name || 'you', r, false)).join('')
+      : `<tr><td colspan="7" class="dim">no ${Leaderboard.label(lbBoard)} runs here yet</td></tr>`;
+    return;
+  }
+
+  note.textContent = '';
+  body.innerHTML = '<tr><td colspan="7" class="dim">loading…</td></tr>';
+  const want = lbBoard + lbPeriod;
+  Leaderboard.fetchBoard(lbBoard, lbPeriod).then(data => {
+    if (lbBoard + lbPeriod !== want) return;               // the user has moved on
+    body.innerHTML = data.entries.length
+      ? data.entries.map(e => lbRow(e.rank, e.name, e, !!e.you)).join('')
+      : `<tr><td colspan="7" class="dim">nobody has posted a ${Leaderboard.label(lbBoard)} run ${lbPeriod === 'day' ? 'in the last 24 hours' : 'yet'} — be the first</td></tr>`;
+    if (data.you && !data.entries.some(e => e.you))
+      body.innerHTML += `<tr class="you-row"><td colspan="7" class="dim">you are #${data.you.rank} of ${data.total} with ${data.you.wpm} wpm</td></tr>`;
+    note.textContent = data.total ? `${data.total} ${data.total === 1 ? 'person' : 'people'} on this board` : '';
+  }).catch(e => {
+    body.innerHTML = `<tr><td colspan="7" class="err">could not load the leaderboard: ${escText(e.message)}</td></tr>`;
+  });
+}
+
+function lbRow(rank, name, r, you) {
+  const when = r.ts || r.date;
+  return `<tr class="${you ? 'you-row' : ''}"><td class="rank">${rank}</td><td>${escText(name || 'anonymous')}${you ? ' <small>(you)</small>' : ''}</td>` +
+    `<td class="num">${Math.round(r.wpm)}</td><td class="num dim">${r.acc}%</td><td class="num dim">${Math.round(r.raw)}</td>` +
+    `<td class="num dim">${r.consistency}%</td><td class="dim">${when ? ago(when) : ''}</td></tr>`;
+}
+
+function ago(ts) {
+  const s = Math.max(0, (Date.now() - ts) / 1000);
+  if (s < 60) return 'just now';
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  if (s < 86400 * 30) return `${Math.floor(s / 86400)} d ago`;
+  return new Date(ts).toLocaleDateString();
+}
+
+$('#lb-drawer-name').addEventListener('change', e => {
+  config.name = Leaderboard.cleanName(e.target.value); e.target.value = config.name; saveConfig();
+});
+$('#lb-name').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); $('#lb-submit').click(); } });
+
+/* ── 8. ui ───────────────────────────────────────────────────────── */
 
 const AMOUNTS = {
   time:  [15, 30, 60, 120],
@@ -886,24 +1174,31 @@ const AMOUNTS = {
   quote: ['short', 'medium', 'long'],
   story: ['short', 'medium', 'long', 'full']
 };
+const LISTS = Object.keys(WORDS.lists);
 
 function renderConfigBar() {
   $$('[data-mode]').forEach(b => b.classList.toggle('active', b.dataset.mode === config.mode));
   /* punctuation and numbers only mean something for generated words */
-  const generated = ['time', 'words', 'infinite', 'adaptive'].includes(config.mode);
+  const generated = isGenerated();
   $$('[data-toggle]').forEach(b => {
     const t = b.dataset.toggle;
     b.hidden = t !== 'tape' && !generated;   // tape is a layout, it applies everywhere
     b.classList.toggle('active', !!config[t]);
   });
+  const listBtn = $('#wordlist-btn');
+  listBtn.hidden = !generated;
+  listBtn.textContent = config.wordList;
+  listBtn.classList.toggle('active', config.wordList !== 'english');
+  $('#list-sep').style.display = generated ? '' : 'none';
+
   const box = $('#amounts');
   const src = $('#source');
   /* A story is worth naming while you type it; a quote's source is a small
      reveal, so that one waits for the results screen. */
   if (config.mode === 'story' && state.quote) {
     src.hidden = false;
-    src.innerHTML = `<b>${state.quote.title}</b><br>${
-      state.quote.author ? state.quote.author : 'written for this test'}${
+    src.innerHTML = `<b>${escText(state.quote.title)}</b><br>${
+      state.quote.author ? escText(state.quote.author) : 'written for this test'}${
       state.quote.note === 'retold' ? ', retold' : ''}`;
   } else src.hidden = true;
 
@@ -930,24 +1225,27 @@ function renderConfigBar() {
 }
 
 function setMode(m) { config.mode = m; saveConfig(); applyConfig(); renderConfigBar(); restart(); }
+function setList(l) { if (!WORDS.lists[l]) return; config.wordList = l; saveConfig(); renderConfigBar(); restart(); }
 
 function restart() {
-  clearInterval(state.timerId);
+  clearTimeout(state.timerId);
   cancelAnimationFrame(state.rafId);
   Object.assign(state, {
     typed: [], wordIndex: 0, started: false, finished: false,
     startTime: 0, endTime: 0, keys: { correct: 0, incorrect: 0, extra: 0, missed: 0 },
     perSecond: [], lastSampleChars: 0, lastSampleErrors: 0, secondsElapsed: 0,
-    shift: { x: 0, y: 0 }, domOffset: 0
+    shift: { x: 0, y: 0 }, domOffset: 0, log: [], result: null, elapsed: 0
   });
   seed();
   renderAll();
   renderConfigBar();               // the source line names the new passage
   resultsEl.hidden = true;
+  lbBox.hidden = true;
   testEl.hidden = false;
   $('#config').style.display = '';
   document.body.classList.remove('typing');
   liveWpmEl.hidden = true;
+  paceEl.hidden = true;
   counterEl.textContent = config.mode === 'time' ? config.time : progressLabel();
   inputEl.value = '';
   inputEl.focus({ preventScroll: true });
@@ -958,6 +1256,8 @@ function repeat() {                                   // same text, fresh run
   restart();
   state.words = words; state.quote = quote;
   renderAll();
+  renderConfigBar();               // restart() named the passage it just discarded
+  counterEl.textContent = config.mode === 'time' ? config.time : progressLabel();
 }
 
 const FONTS = ['JetBrains Mono', 'Roboto Mono', 'IBM Plex Mono', 'Source Code Pro', 'system mono'];
@@ -971,7 +1271,6 @@ function applyConfig() {
   document.documentElement.dataset.theme = config.theme;
   document.documentElement.dataset.caret = config.caret;
   document.documentElement.style.setProperty('--font-size', config.fontSize + 'rem');
-  caretEl.classList.toggle('smooth', config.smooth);
   wordsEl.classList.toggle('blind', config.blind);
   Sound.pack = config.sound;
   Sound.volume = config.volume / 100;
@@ -979,19 +1278,31 @@ function applyConfig() {
   $('#theme-name').textContent = config.theme.replace(/-/g, ' ');
   $('#sound-name').textContent = config.sound;
   liveWpmEl.hidden = !config.liveWpm || !state.started;
+  const meta = $('meta[name="theme-color"]');
+  if (meta) meta.content = css('--bg');
+  /* a theme change while the results are up must recolour the charts */
+  if (!resultsEl.hidden) drawChart();
+  if (!$('#stats').hidden) drawHistoryChart();
 }
 
 /* settings drawer -------------------------------------------------- */
-const THEMES = ['serika-dark','dracula','nord','catppuccin','gruvbox','tokyo-night','matrix','rose-pine','paper','solarized-light'];
+const THEMES = ['serika-dark','dracula','nord','catppuccin','gruvbox','tokyo-night','matrix','rose-pine',
+                'monokai','one-dark','everforest','midnight','coffee','paper','solarized-light','lavender'];
 
-function chips(container, values, current, onPick, labels) {
+/* A row of chips. Picking one saves, applies, and redraws — unless the
+   caller asks for `silent`, for chips that are not settings at all. */
+function chips(container, values, current, onPick, labels, opts = {}) {
   const el = $(container);
   el.innerHTML = '';
   values.forEach(v => {
     const b = document.createElement('button');
     b.className = 'chip' + (v === current ? ' active' : '');
     b.textContent = labels ? labels(v) : String(v).replace(/-/g, ' ');
-    b.onclick = () => { onPick(v); saveConfig(); applyConfig(); renderSettings(); renderAll(); };
+    b.onclick = () => {
+      onPick(v);
+      if (opts.silent) { (opts.rerender || (() => {}))(); return; }
+      saveConfig(); applyConfig(); renderSettings(); renderAll();
+    };
     el.appendChild(b);
   });
 }
@@ -1006,14 +1317,24 @@ function renderSettings() {
   chips('#set-theme', THEMES, config.theme, v => config.theme = v);
   chips('#set-caret', ['line', 'block', 'underline', 'off'], config.caret, v => config.caret = v);
   chips('#set-smooth', [true, false], config.smooth, v => config.smooth = v, v => v ? 'on' : 'off');
+  chips('#set-pace', ['off', 'pb', 'last', 'custom'], config.pace, v => config.pace = v,
+        v => v === 'pb' ? 'personal best' : v === 'last' ? 'last run' : v);
+  $('#set-pacewpm').value = config.paceWpm;
   chips('#set-stoponerror', ['off', 'letter', 'word'], config.stopOnError, v => config.stopOnError = v);
   chips('#set-blind', [true, false], config.blind, v => config.blind = v, v => v ? 'on' : 'off');
   chips('#set-livewpm', [true, false], config.liveWpm, v => config.liveWpm = v, v => v ? 'on' : 'off');
   chips('#set-tape', [false, true], config.tape, v => { config.tape = v; }, v => v ? 'single line' : 'paragraph');
+  chips('#set-list', LISTS, config.wordList, v => { config.wordList = v; renderConfigBar(); restart(); }, v => v);
   chips('#set-font', FONTS, config.font, v => config.font = v, v => v);
   chips('#set-weight', [400, 500, 700], config.fontWeight, v => config.fontWeight = v,
         v => v === 400 ? 'regular' : v === 500 ? 'medium' : 'bold');
   chips('#set-fontsize', [1.2, 1.6, 2, 2.4], config.fontSize, v => config.fontSize = v, v => v + 'x');
+  chips('#set-leaderboard', ['ask', 'on', 'off'], config.leaderboard, v => config.leaderboard = v,
+        v => v === 'ask' ? 'ask each time' : v === 'on' ? 'always' : 'never');
+  $('#set-name').value = config.name || '';
+  $('#set-leaderboard-note').textContent = Leaderboard.enabled
+    ? 'runs that qualify (english list, no punctuation or numbers, at least ' + Leaderboard.MIN_ACC + '% accuracy) can be posted to the global board.'
+    : 'no global leaderboard is configured for this copy of the site; nothing is sent anywhere.';
   $('#set-volume').value = config.volume;
   /* Sound arriving late is the audio device, not the page — show the number
      so it can be told apart from a bug in here. */
@@ -1025,10 +1346,48 @@ $('#set-volume').addEventListener('input', e => {
   config.volume = +e.target.value; Sound.volume = config.volume / 100; saveConfig();
 });
 $('#set-volume').addEventListener('change', () => Sound.play('letter'));
+$('#set-pacewpm').addEventListener('change', e => {
+  config.paceWpm = Math.max(10, Math.min(400, Math.round(+e.target.value) || 60));
+  e.target.value = config.paceWpm;
+  if (config.pace !== 'custom') { config.pace = 'custom'; renderSettings(); }
+  saveConfig();
+});
+$('#set-name').addEventListener('change', e => {
+  config.name = Leaderboard.cleanName(e.target.value); e.target.value = config.name; saveConfig();
+});
 $('#set-reset').addEventListener('click', () => {
   if (!confirm('Clear all results, personal bests and per-key history?')) return;
   store.clear(); history = []; pb = {}; keyStats = {};
   Object.assign(config, DEFAULTS); saveConfig(); applyConfig(); renderConfigBar(); renderSettings(); restart();
+});
+
+/* Your data is yours: a JSON file out, the same file back in. */
+$('#set-export').addEventListener('click', () => {
+  const data = { app: 'type', version: 1, exported: new Date().toISOString(), config, history, pb, keys: keyStats };
+  const blob = new Blob([JSON.stringify(data, null, 1)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `type-data-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+});
+$('#set-import').addEventListener('change', async e => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  try {
+    const data = JSON.parse(await file.text());
+    if (data.app !== 'type' || !Array.isArray(data.history)) throw new Error('not a type export');
+    if (!confirm(`Import ${data.history.length} results and replace what is on this device?`)) return;
+    history = data.history.filter(r => r && typeof r.wpm === 'number').slice(0, 100);
+    pb = (data.pb && typeof data.pb === 'object') ? data.pb : {};
+    keyStats = (data.keys && typeof data.keys === 'object') ? data.keys : {};
+    if (data.config && typeof data.config === 'object') Object.assign(config, DEFAULTS, data.config);
+    if (!WORDS.lists[config.wordList]) config.wordList = 'english';
+    store.set('history', history); store.set('pb', pb); store.set('keys', keyStats); saveConfig();
+    applyConfig(); renderConfigBar(); renderSettings(); restart();
+    alert('imported.');
+  } catch (err) { alert('could not import: ' + err.message); }
 });
 
 /* stats drawer ----------------------------------------------------- */
@@ -1037,7 +1396,7 @@ function renderStats() {
   const keys = order.filter(k => pb[k]).concat(Object.keys(pb).filter(k => !order.includes(k)));
   $('#pb-grid').innerHTML = keys.length ? keys.map(k => `
     <div class="pb-card">
-      <div class="pb-mode">${k.replace(/-/g, ' ')}</div>
+      <div class="pb-mode">${escText(keyLabel(k))}</div>
       <div class="pb-wpm">${pb[k].wpm}</div>
       <div class="pb-acc">${pb[k].acc}% acc</div>
     </div>`).join('')
@@ -1045,7 +1404,7 @@ function renderStats() {
 
   $('#history-body').innerHTML = history.slice(0, 50).map(r => `
     <tr><td>${r.wpm}</td><td class="dim">${r.raw}</td><td>${r.acc}%</td>
-        <td class="dim">${r.consistency}%</td><td class="dim">${r.mode}</td>
+        <td class="dim">${r.consistency}%</td><td class="dim">${escText(keyLabel(r.key || r.mode))}</td>
         <td class="dim">${new Date(r.date).toLocaleString()}</td></tr>`).join('');
 
   $('#keyboard-heat').innerHTML = WORDS.rows.map((row, ri) => `<div class="heat-row" style="padding-left:${ri * 1.1}rem">${
@@ -1073,19 +1432,24 @@ function commands() {
     { name: 'repeat this text', run: repeat },
     { name: 'open settings', run: () => openDrawer('settings') },
     { name: 'view your results', run: () => openDrawer('stats') },
+    { name: 'open leaderboard', run: () => openDrawer('leaderboard') },
     { name: 'toggle punctuation', run: () => { config.punctuation = !config.punctuation; saveConfig(); renderConfigBar(); restart(); } },
     { name: 'toggle numbers', run: () => { config.numbers = !config.numbers; saveConfig(); renderConfigBar(); restart(); } },
-    { name: 'toggle blind mode', run: () => { config.blind = !config.blind; saveConfig(); applyConfig(); } }
+    { name: 'toggle blind mode', run: () => { config.blind = !config.blind; saveConfig(); applyConfig(); } },
+    { name: 'export your data', run: () => $('#set-export').click() }
   ];
   ['time','words','quote','story','infinite','zen','adaptive'].forEach(m =>
     c.push({ name: `mode ${m}`, hint: 'mode', run: () => setMode(m) }));
   AMOUNTS.story.forEach(v => c.push({ name: `story ${v}`, hint: 'story',
     run: () => { config.mode='story'; config.storyLength=v; saveConfig(); applyConfig(); restart(); } }));
-  AMOUNTS.time.forEach(v => c.push({ name: `time ${v}`, hint: 'time', run: () => { config.mode='time'; config.time=v; saveConfig(); renderConfigBar(); restart(); } }));
-  AMOUNTS.words.forEach(v => c.push({ name: `words ${v}`, hint: 'words', run: () => { config.mode='words'; config.wordCount=v; saveConfig(); renderConfigBar(); restart(); } }));
+  AMOUNTS.time.forEach(v => c.push({ name: `time ${v}`, hint: 'time', run: () => { config.mode='time'; config.time=v; saveConfig(); applyConfig(); restart(); } }));
+  AMOUNTS.words.forEach(v => c.push({ name: `words ${v}`, hint: 'words', run: () => { config.mode='words'; config.wordCount=v; saveConfig(); applyConfig(); restart(); } }));
+  LISTS.forEach(l => c.push({ name: `word list ${l}`, hint: 'words', run: () => setList(l) }));
   THEMES.forEach(t => c.push({ name: `theme ${t.replace(/-/g,' ')}`, hint: 'theme', run: () => { config.theme=t; saveConfig(); applyConfig(); } }));
   Sound.packs.forEach(s => c.push({ name: `sound ${s}`, hint: 'sound', run: () => { config.sound=s; saveConfig(); applyConfig(); Sound.play('letter'); } }));
   ['same','deeper','off'].forEach(v => c.push({ name: `space bar sound ${v}`, hint: 'sound', run: () => { config.spaceSound=v; saveConfig(); } }));
+  ['off','pb','last','custom'].forEach(v => c.push({ name: `pace caret ${v === 'pb' ? 'personal best' : v === 'last' ? 'last run' : v}`, hint: 'pace',
+    run: () => { config.pace = v; saveConfig(); } }));
   c.push({ name: `single line (tape) ${config.tape ? 'off' : 'on'}`, hint: 'display',
            run: () => { config.tape = !config.tape; saveConfig(); applyConfig(); renderAll(); } });
   FONTS.forEach(f => c.push({ name: `font ${f}`, hint: 'font', run: () => { config.font=f; saveConfig(); applyConfig(); renderAll(); } }));
@@ -1108,7 +1472,7 @@ function filterPalette(q) {
   palItems = commands().filter(c => !needle || c.name.toLowerCase().includes(needle));
   palIndex = 0;
   $('#palette-list').innerHTML = palItems
-    .map((c, i) => `<li class="${i === 0 ? 'sel' : ''}" data-i="${i}">${c.name}<span class="p-hint">${c.hint || ''}</span></li>`)
+    .map((c, i) => `<li class="${i === 0 ? 'sel' : ''}" data-i="${i}">${escText(c.name)}<span class="p-hint">${c.hint || ''}</span></li>`)
     .join('');
 }
 function movePalette(d) {
@@ -1140,19 +1504,19 @@ $('#palette').addEventListener('mousedown', e => { if (e.target.id === 'palette'
 
 /* drawers ---------------------------------------------------------- */
 function openDrawer(id) {
+  closeDrawers(false);
   $('#' + id).hidden = false;
   if (id === 'settings') renderSettings();
   if (id === 'stats') renderStats();
+  if (id === 'leaderboard') { pickBoard(); renderLeaderboard(); }
+  $('#' + id).scrollTop = 0;
 }
-function closeDrawers() {
-  ['settings', 'stats'].forEach(id => $('#' + id).hidden = true);
-  inputEl.focus({ preventScroll: true });
+function closeDrawers(refocus = true) {
+  ['settings', 'stats', 'leaderboard'].forEach(id => $('#' + id).hidden = true);
+  if (refocus) inputEl.focus({ preventScroll: true });
 }
-$$('[data-close]').forEach(b => b.onclick = closeDrawers);
+$$('[data-close]').forEach(b => b.onclick = () => closeDrawers());
 $$('.drawer').forEach(d => d.addEventListener('mousedown', e => { if (e.target === d) closeDrawers(); }));
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && (!$('#settings').hidden || !$('#stats').hidden)) { e.preventDefault(); closeDrawers(); }
-}, true);
 
 /* wiring ----------------------------------------------------------- */
 $$('[data-mode]').forEach(b => b.onclick = () => setMode(b.dataset.mode));
@@ -1160,13 +1524,14 @@ $$('[data-toggle]').forEach(b => b.onclick = () => {
   config[b.dataset.toggle] = !config[b.dataset.toggle];
   saveConfig(); applyConfig(); renderConfigBar(); restart();
 });
+$('#wordlist-btn').onclick = () => setList(LISTS[(LISTS.indexOf(config.wordList) + 1) % LISTS.length]);
 $('#restart').onclick = restart;
 $('#next-test').onclick = restart;
 $('#repeat-test').onclick = repeat;
 $('#logo').onclick = e => { e.preventDefault(); restart(); };
 $('#share-result').onclick = async () => {
-  const r = history[0]; if (!r) return;
-  const text = `${r.wpm} wpm · ${r.acc}% acc · ${r.mode} · consistency ${r.consistency}% — type`;
+  const r = state.result || history[0]; if (!r) return;
+  const text = `${r.wpm} wpm · ${r.acc}% acc · ${keyLabel(r.key || r.mode)} · consistency ${r.consistency}% — type`;
   try { await navigator.clipboard.writeText(text); $('#share-result').textContent = '✓'; }
   catch { $('#share-result').textContent = '✕'; }
   setTimeout(() => $('#share-result').textContent = '⧉', 1200);
@@ -1176,8 +1541,11 @@ $$('[data-action]').forEach(b => b.onclick = () => {
   if (a === 'palette') openPalette();
   if (a === 'settings') openDrawer('settings');
   if (a === 'stats') openDrawer('stats');
+  if (a === 'leaderboard') openDrawer('leaderboard');
   if (a === 'theme') { const i = THEMES.indexOf(config.theme); config.theme = THEMES[(i + 1) % THEMES.length]; saveConfig(); applyConfig(); }
   if (a === 'sound') { const i = Sound.packs.indexOf(config.sound); config.sound = Sound.packs[(i + 1) % Sound.packs.length]; saveConfig(); applyConfig(); Sound.play('letter'); }
+  /* a button that keeps focus would take the next enter as a click */
+  if (a === 'theme' || a === 'sound') { b.blur(); inputEl.focus({ preventScroll: true }); }
 });
 
 areaEl.addEventListener('mousedown', () => setTimeout(() => inputEl.focus({ preventScroll: true }), 0));
@@ -1187,7 +1555,7 @@ areaEl.addEventListener('mousedown', () => setTimeout(() => inputEl.focus({ prev
    window is not the one receiving keys. */
 const setFocused = on => {
   areaEl.classList.toggle('unfocused', !on);
-  if (on) inputEl.focus({ preventScroll: true });
+  if (on && !drawerOpen() && $('#palette').hidden && !isEditable(document.activeElement)) inputEl.focus({ preventScroll: true });
 };
 window.addEventListener('blur', () => setFocused(false));
 window.addEventListener('focus', () => setFocused(true));
@@ -1205,11 +1573,30 @@ document.addEventListener('mousemove', e => {
   document.body.classList.remove('typing');
 });
 document.addEventListener('pointerdown', () => Sound.unlock(), { once: true });
-window.addEventListener('resize', () => { measureLines(); scrollView(); updateCaret(); snapMotion(); if (!resultsEl.hidden) drawChart(); });
+
+const relayout = () => { measureLines(); scrollView(); updateCaret(); snapMotion(); };
+window.addEventListener('resize', () => { relayout(); if (!resultsEl.hidden) drawChart(); });
+/* The web fonts arrive after the first paint and rewrap every line. The
+   measured line tops and the caret have to follow, or the caret sits on
+   the fallback font's letter until the next keystroke. */
+if (document.fonts) {
+  document.fonts.ready.then(relayout);
+  document.fonts.addEventListener('loadingdone', relayout);
+}
+
+/* Offline: a service worker keeps a copy of the site, so it opens with no
+   network and can be installed like an app. Not from file://, and never
+   from the single-file build in dist/. */
+if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol) && !/\/dist\//.test(location.pathname)) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
+}
 
 /* A read-only window into the engine, for the test harness. */
 window.__type = { get state() { return state; }, get config() { return config; },
-                  get motion() { return { view, caret, target, shift: state.shift }; } };
+                  get history() { return history; }, get pb() { return pb; },
+                  get motion() { return { view, caret, target, shift: state.shift }; },
+                  evidence: () => state.result ? evidence(state.result, state.elapsed) : null,
+                  finish, restart, openDrawer };
 
 /* go --------------------------------------------------------------- */
 applyConfig();

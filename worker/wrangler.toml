@@ -1,0 +1,16 @@
+# The leaderboard worker. See README.md in this directory.
+name = "type-leaderboard"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "type-leaderboard"
+# paste the id printed by `wrangler d1 create type-leaderboard`
+database_id = "REPLACE-WITH-YOUR-DATABASE-ID"
+
+[vars]
+# comma-separated origins allowed to call the API, or * for any
+ALLOWED_ORIGINS = "*"
+# submissions per hour from one address
+RATE_LIMIT = "40"

@@ -1,0 +1,17 @@
+{
+  "name": "type-leaderboard",
+  "private": true,
+  "type": "module",
+  "description": "Leaderboard API for the type typing test — a Cloudflare Worker over D1.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:create": "wrangler d1 create type-leaderboard",
+    "db:init": "wrangler d1 execute type-leaderboard --remote --file=schema.sql",
+    "db:init:local": "wrangler d1 execute type-leaderboard --local --file=schema.sql",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
